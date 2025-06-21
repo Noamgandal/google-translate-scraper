@@ -30,6 +30,18 @@
           <span class="status-label">Words Scraped:</span>
           <span id="wordCount" class="status-value">0</span>
         </div>
+        <div class="status-item">
+          <span class="status-label">Authentication:</span>
+          <span id="authStatus" class="status-value">Checking...</span>
+        </div>
+        <div class="status-item" id="userEmailItem" style="display: none;">
+          <span class="status-label">User:</span>
+          <span id="userEmail" class="status-value"></span>
+        </div>
+        <div class="status-item" id="tokenExpiryItem" style="display: none;">
+          <span class="status-label">Token Expires:</span>
+          <span id="tokenExpiry" class="status-value"></span>
+        </div>
       </div>
     </section>
 
@@ -99,6 +111,13 @@
       <button id="manualScrape" class="btn btn-secondary">
         <span class="btn-text">Scrape Now</span>
         <span id="scrapeSpinner" class="spinner" style="display: none;"></span>
+      </button>
+      <button id="signInButton" class="btn btn-auth" style="display: none;">
+        <span class="btn-text">Sign In</span>
+        <span id="authSpinner" class="spinner" style="display: none;"></span>
+      </button>
+      <button id="signOutButton" class="btn btn-auth-secondary" style="display: none;">
+        <span class="btn-text">Sign Out</span>
       </button>
     </div>
 

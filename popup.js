@@ -7,6 +7,11 @@ const elements = {
   extensionStatus: document.getElementById('extensionStatus'),
   lastScrapeTime: document.getElementById('lastScrapeTime'),
   wordCount: document.getElementById('wordCount'),
+  authStatus: document.getElementById('authStatus'),
+  userEmail: document.getElementById('userEmail'),
+  userEmailItem: document.getElementById('userEmailItem'),
+  tokenExpiry: document.getElementById('tokenExpiry'),
+  tokenExpiryItem: document.getElementById('tokenExpiryItem'),
   
   // Form elements
   settingsForm: document.getElementById('settingsForm'),
@@ -19,6 +24,8 @@ const elements = {
   // Buttons
   saveSettings: document.getElementById('saveSettings'),
   manualScrape: document.getElementById('manualScrape'),
+  signInButton: document.getElementById('signInButton'),
+  signOutButton: document.getElementById('signOutButton'),
   helpLink: document.getElementById('helpLink'),
   
   // UI feedback
@@ -26,7 +33,8 @@ const elements = {
   messageText: document.getElementById('messageText'),
   sheetsIdError: document.getElementById('sheetsIdError'),
   saveSpinner: document.getElementById('saveSpinner'),
-  scrapeSpinner: document.getElementById('scrapeSpinner')
+  scrapeSpinner: document.getElementById('scrapeSpinner'),
+  authSpinner: document.getElementById('authSpinner')
 };
 
 // Initialize popup when DOM is loaded
@@ -47,11 +55,17 @@ async function initializePopup() {
     // Load current settings
     await loadSettings();
     
+    // Check authentication status
+    await checkAuthenticationStatus();
+    
     // Update status display
     await updateStatus();
     
     // Set up periodic status updates
-    setInterval(updateStatus, 5000); // Update every 5 seconds
+    setInterval(async () => {
+      await updateStatus();
+      await checkAuthenticationStatus();
+    }, 5000); // Update every 5 seconds
     
   } catch (error) {
     console.error('Error during popup initialization:', error);
@@ -211,6 +225,17 @@ function setupEventListeners() {
     await performManualScrape();
   });
   
+  // Authentication buttons
+  elements.signInButton.addEventListener('click', async (e) => {
+    e.preventDefault();
+    await performAuthentication();
+  });
+  
+  elements.signOutButton.addEventListener('click', async (e) => {
+    e.preventDefault();
+    await clearAuthentication();
+  });
+  
   // Enable/disable scraping toggle
   elements.enableScraping.addEventListener('change', () => {
     updateIntervalState();
@@ -278,6 +303,10 @@ function showSpinner(type, show) {
   } else if (type === 'scrape') {
     elements.scrapeSpinner.style.display = show ? 'inline-block' : 'none';
     elements.manualScrape.disabled = show;
+  } else if (type === 'auth') {
+    elements.authSpinner.style.display = show ? 'inline-block' : 'none';
+    elements.signInButton.disabled = show;
+    elements.signOutButton.disabled = show;
   }
 }
 
@@ -359,6 +388,147 @@ function getDefaultSettings() {
   };
 }
 
+// Authentication Functions
+
+// Check and display authentication status
+async function checkAuthenticationStatus() {
+  try {
+    // Send message to background script to check auth status
+    const response = await chrome.runtime.sendMessage({ action: 'getAuthStatus' });
+    
+    if (response && response.success) {
+      const authData = response.data;
+      updateAuthenticationUI(authData);
+    } else {
+      // Not authenticated
+      updateAuthenticationUI(null);
+    }
+    
+  } catch (error) {
+    console.error('Error checking authentication status:', error);
+    elements.authStatus.textContent = 'Error';
+    elements.authStatus.className = 'status-value status-disabled';
+    updateAuthenticationUI(null);
+  }
+}
+
+// Perform authentication (sign in)
+async function performAuthentication() {
+  try {
+    showSpinner('auth', true);
+    elements.authStatus.textContent = 'Signing in...';
+    
+    // Send message to background script to authenticate
+    const response = await chrome.runtime.sendMessage({ action: 'authenticate' });
+    
+    if (response && response.success) {
+      const authData = response.data;
+      updateAuthenticationUI(authData);
+      showMessage('Successfully signed in!', 'success');
+      
+      // Get user info for display
+      const userResponse = await chrome.runtime.sendMessage({ action: 'getUserInfo' });
+      if (userResponse && userResponse.success) {
+        updateAuthenticationUI({ ...authData, userInfo: userResponse.data });
+      }
+      
+    } else {
+      const errorMsg = response?.error || 'Authentication failed';
+      showMessage(`Authentication failed: ${errorMsg}`, 'error');
+      updateAuthenticationUI(null);
+    }
+    
+  } catch (error) {
+    console.error('Error during authentication:', error);
+    showMessage('Authentication error occurred', 'error');
+    updateAuthenticationUI(null);
+  } finally {
+    showSpinner('auth', false);
+  }
+}
+
+// Clear authentication (sign out)
+async function clearAuthentication() {
+  try {
+    showSpinner('auth', true);
+    elements.authStatus.textContent = 'Signing out...';
+    
+    // Send message to background script to clear auth
+    const response = await chrome.runtime.sendMessage({ action: 'clearAuth' });
+    
+    if (response && response.success) {
+      updateAuthenticationUI(null);
+      showMessage('Successfully signed out', 'success');
+    } else {
+      const errorMsg = response?.error || 'Sign out failed';
+      showMessage(`Sign out failed: ${errorMsg}`, 'error');
+    }
+    
+  } catch (error) {
+    console.error('Error during sign out:', error);
+    showMessage('Sign out error occurred', 'error');
+  } finally {
+    showSpinner('auth', false);
+  }
+}
+
+// Update UI based on authentication state
+function updateAuthenticationUI(authData) {
+  if (authData && authData.isAuthenticated) {
+    // User is authenticated
+    elements.authStatus.textContent = 'Authenticated';
+    elements.authStatus.className = 'status-value status-enabled';
+    
+    // Show sign out button, hide sign in button
+    elements.signInButton.style.display = 'none';
+    elements.signOutButton.style.display = 'block';
+    
+    // Show user email if available
+    if (authData.userInfo && authData.userInfo.email) {
+      elements.userEmail.textContent = authData.userInfo.email;
+      elements.userEmailItem.style.display = 'flex';
+    } else {
+      elements.userEmailItem.style.display = 'none';
+    }
+    
+    // Show token expiry if available
+    if (authData.tokenExpiry) {
+      const expiryDate = new Date(authData.tokenExpiry);
+      const now = new Date();
+      const timeUntilExpiry = Math.floor((expiryDate - now) / (1000 * 60)); // minutes
+      
+      if (timeUntilExpiry > 0) {
+        if (timeUntilExpiry < 60) {
+          elements.tokenExpiry.textContent = `${timeUntilExpiry} minutes`;
+        } else {
+          const hours = Math.floor(timeUntilExpiry / 60);
+          elements.tokenExpiry.textContent = `${hours} hour${hours !== 1 ? 's' : ''}`;
+        }
+        elements.tokenExpiry.className = 'status-value';
+      } else {
+        elements.tokenExpiry.textContent = 'Expired';
+        elements.tokenExpiry.className = 'status-value status-disabled';
+      }
+      elements.tokenExpiryItem.style.display = 'flex';
+    } else {
+      elements.tokenExpiryItem.style.display = 'none';
+    }
+    
+  } else {
+    // User is not authenticated
+    elements.authStatus.textContent = 'Not authenticated';
+    elements.authStatus.className = 'status-value status-disabled';
+    
+    // Show sign in button, hide sign out button
+    elements.signInButton.style.display = 'block';
+    elements.signOutButton.style.display = 'none';
+    
+    // Hide user info
+    elements.userEmailItem.style.display = 'none';
+    elements.tokenExpiryItem.style.display = 'none';
+  }
+}
+
 // Listen for messages from background script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'statusUpdate') {
@@ -370,6 +540,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else {
       showMessage('Scraping failed', 'error');
     }
+  } else if (message.action === 'authStatusChanged') {
+    checkAuthenticationStatus();
   }
 });
 

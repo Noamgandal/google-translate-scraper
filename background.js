@@ -4,6 +4,9 @@
 // Import TabManager for tab operations
 importScripts('tab-manager.js');
 
+// Import AuthManager for Google OAuth authentication
+importScripts('auth.js');
+
 // Default extension settings
 const DEFAULT_SETTINGS = {
   isEnabled: true,
@@ -108,6 +111,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.log('Processing cleanup all tabs request');
         const cleanupResult = await tabManager.cleanupAllTabs();
         sendResponse({ success: true, cleanupResult });
+        
+      } else if (message.action === 'authenticate') {
+        console.log('Processing authentication request');
+        const authResult = await handleAuthentication(message.options || {});
+        sendResponse(authResult);
+        
+      } else if (message.action === 'getAuthStatus') {
+        console.log('Processing auth status request');
+        const authStatus = await handleGetAuthStatus();
+        sendResponse(authStatus);
+        
+      } else if (message.action === 'clearAuth') {
+        console.log('Processing clear auth request');
+        const clearResult = await handleClearAuth();
+        sendResponse(clearResult);
+        
+      } else if (message.action === 'getUserInfo') {
+        console.log('Processing get user info request');
+        const userInfoResult = await handleGetUserInfo();
+        sendResponse(userInfoResult);
         
       } else {
         console.warn('Unknown message action:', message.action);
@@ -344,6 +367,16 @@ async function executeScraping(triggerType) {
   try {
     const startTime = Date.now();
     console.log(`Executing ${triggerType} scraping with TabManager...`);
+    
+    // Check authentication before scraping
+    console.log('Checking authentication status before scraping...');
+    const authStatus = await checkAuthenticationForScraping();
+    
+    if (!authStatus.success) {
+      throw new Error(`Authentication required for scraping: ${authStatus.error}`);
+    }
+    
+    console.log(`Authentication verified for user: ${authStatus.user?.email || 'unknown'}`);
     
     // Get current settings
     const settings = await getSettings();
@@ -596,15 +629,22 @@ async function checkAndRecreateAlarms() {
   }
 }
 
-// Initialize TabManager and perform startup checks
+// Initialize TabManager and AuthManager, perform startup checks
 async function initializeServiceWorker() {
   try {
-    console.log('Initializing service worker with TabManager...');
+    console.log('Initializing service worker with TabManager and AuthManager...');
     
     // Ensure TabManager is ready
     if (typeof tabManager === 'undefined') {
       throw new Error('TabManager not available - check tab-manager.js import');
     }
+    
+    // Ensure AuthManager is ready
+    if (typeof authManager === 'undefined') {
+      throw new Error('AuthManager not available - check auth.js import');
+    }
+    
+    console.log('TabManager and AuthManager modules loaded successfully');
     
     // Clean up any orphaned tabs from previous session
     const cleanupResult = await tabManager.cleanupAllTabs();
@@ -615,10 +655,200 @@ async function initializeServiceWorker() {
     // Check and recreate alarms
     await checkAndRecreateAlarms();
     
+    // Check authentication status on startup
+    try {
+      const authStatus = await authManager.checkAuthStatus();
+      console.log('Initial auth status:', authStatus.isAuthenticated ? 'authenticated' : 'not authenticated');
+    } catch (authError) {
+      console.warn('Error checking initial auth status:', authError);
+    }
+    
     console.log('Service worker initialization completed successfully');
     
   } catch (error) {
     console.error('Error during service worker initialization:', error);
+  }
+}
+
+// Authentication handler functions
+async function handleAuthentication(options = {}) {
+  try {
+    console.log('Handling authentication request with options:', options);
+    
+    // Ensure AuthManager is available
+    if (typeof authManager === 'undefined') {
+      throw new Error('AuthManager not available');
+    }
+    
+    // Get authentication token
+    const token = await authManager.getAuthToken({
+      interactive: options.interactive !== false, // Default to true
+      forceRefresh: options.forceRefresh || false
+    });
+    
+    // Get user info to confirm authentication
+    const userInfo = await authManager.getUserInfo();
+    
+    console.log(`Authentication successful for user: ${userInfo.email}`);
+    
+    return {
+      success: true,
+      user: {
+        email: userInfo.email,
+        name: userInfo.name,
+        picture: userInfo.picture
+      },
+      hasToken: !!token
+    };
+    
+  } catch (error) {
+    console.error('Authentication failed:', error);
+    return {
+      success: false,
+      error: error.message,
+      needsInteraction: error.message.includes('interactive') || error.message.includes('user denied')
+    };
+  }
+}
+
+async function handleGetAuthStatus() {
+  try {
+    console.log('Getting authentication status...');
+    
+    // Ensure AuthManager is available
+    if (typeof authManager === 'undefined') {
+      throw new Error('AuthManager not available');
+    }
+    
+    const authStatus = await authManager.checkAuthStatus();
+    
+    return {
+      success: true,
+      authStatus: authStatus
+    };
+    
+  } catch (error) {
+    console.error('Error getting auth status:', error);
+    return {
+      success: false,
+      error: error.message,
+      authStatus: {
+        isAuthenticated: false,
+        state: 'error',
+        error: error.message
+      }
+    };
+  }
+}
+
+async function handleClearAuth() {
+  try {
+    console.log('Clearing authentication...');
+    
+    // Ensure AuthManager is available
+    if (typeof authManager === 'undefined') {
+      throw new Error('AuthManager not available');
+    }
+    
+    const cleared = await authManager.clearAuthToken();
+    
+    console.log('Authentication cleared successfully');
+    
+    return {
+      success: true,
+      cleared: cleared
+    };
+    
+  } catch (error) {
+    console.error('Error clearing authentication:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+async function handleGetUserInfo() {
+  try {
+    console.log('Getting user information...');
+    
+    // Ensure AuthManager is available
+    if (typeof authManager === 'undefined') {
+      throw new Error('AuthManager not available');
+    }
+    
+    // Check if authenticated first
+    const authStatus = await authManager.checkAuthStatus();
+    if (!authStatus.isAuthenticated) {
+      throw new Error('User not authenticated. Please login first.');
+    }
+    
+    const userInfo = await authManager.getUserInfo();
+    
+    console.log(`User info retrieved for: ${userInfo.email}`);
+    
+    return {
+      success: true,
+      userInfo: userInfo
+    };
+    
+  } catch (error) {
+    console.error('Error getting user info:', error);
+    return {
+      success: false,
+      error: error.message,
+      needsAuth: error.message.includes('not authenticated')
+    };
+  }
+}
+
+async function checkAuthenticationForScraping() {
+  try {
+    console.log('Checking authentication for scraping operation...');
+    
+    // Ensure AuthManager is available
+    if (typeof authManager === 'undefined') {
+      console.warn('AuthManager not available - proceeding without authentication');
+      return {
+        success: true,
+        user: null,
+        warning: 'Authentication not available - limited functionality'
+      };
+    }
+    
+    // Check authentication status
+    const authStatus = await authManager.checkAuthStatus();
+    
+    if (!authStatus.isAuthenticated) {
+      return {
+        success: false,
+        error: 'User not authenticated. Google API access requires authentication.',
+        needsAuth: true,
+        authStatus: authStatus
+      };
+    }
+    
+    // Get user info for logging
+    let userInfo = null;
+    try {
+      userInfo = await authManager.getUserInfo();
+    } catch (userError) {
+      console.warn('Could not get user info:', userError);
+    }
+    
+    return {
+      success: true,
+      user: userInfo,
+      authStatus: authStatus
+    };
+    
+  } catch (error) {
+    console.error('Error checking authentication for scraping:', error);
+    return {
+      success: false,
+      error: error.message,
+      needsAuth: true
+    };
   }
 }
 

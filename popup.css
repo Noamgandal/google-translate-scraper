@@ -321,6 +321,31 @@ body {
   border-color: var(--text-secondary);
 }
 
+/* Authentication Buttons */
+.btn-auth {
+  background-color: var(--secondary-color);
+  color: white;
+  box-shadow: var(--shadow-light);
+}
+
+.btn-auth:hover:not(:disabled) {
+  background-color: #0c9d58;
+  box-shadow: var(--shadow-medium);
+  transform: translateY(-1px);
+}
+
+.btn-auth-secondary {
+  background-color: #f8f9fa;
+  color: var(--text-primary);
+  border: 2px solid var(--border-color);
+}
+
+.btn-auth-secondary:hover:not(:disabled) {
+  background-color: #e8f0fe;
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
+
 /* Spinner */
 .spinner {
   width: 16px;
