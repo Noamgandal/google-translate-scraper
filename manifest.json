@@ -9,7 +9,8 @@
     "alarms",
     "tabs",
     "activeTab",
-    "scripting"
+    "scripting",
+    "identity"
   ],
   
   "host_permissions": [
@@ -33,5 +34,14 @@
   
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  
+  "oauth2": {
+    "client_id": "734462042602-7f6r7h8851tjprf7lqn5l1726at886pr.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/spreadsheets",
+      "https://www.googleapis.com/auth/gmail.send",
+      "https://www.googleapis.com/auth/userinfo.email"
+    ]
   }
 } 
