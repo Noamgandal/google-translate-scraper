@@ -238,28 +238,123 @@ class AuthManager {
 
   /**
    * Gets token information from Google's tokeninfo endpoint
-   * @param {string} token - Access token
+   * @param {string} token - Access token to validate
+   * @param {number} retryAttempt - Current retry attempt (for internal use)
    * @returns {Promise<Object>} Token information
    */
-  async _getTokenInfo(token) {
+  async _getTokenInfo(token, retryAttempt = 0) {
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY = 1000; // 1 second
+
     try {
-      const response = await fetch(`https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${token}`);
+      console.log(`Validating token with Google tokeninfo endpoint (attempt ${retryAttempt + 1}/${MAX_RETRIES + 1})`);
+
+      // Use the correct current Google tokeninfo endpoint with proper URL encoding
+      const params = new URLSearchParams({ access_token: token });
+      const url = `https://oauth2.googleapis.com/tokeninfo?${params.toString()}`;
+      
+      console.log('Making tokeninfo request to:', url.replace(token, 'TOKEN_HIDDEN'));
+
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Google-Translate-Scraper/1.0'
+        }
+      });
+
+      console.log(`Tokeninfo response status: ${response.status} ${response.statusText}`);
       
       if (!response.ok) {
-        throw new Error(`Token validation request failed: ${response.status} ${response.statusText}`);
+        // Get error details from response body if available
+        let errorDetails = '';
+        try {
+          const errorBody = await response.text();
+          console.log('Error response body:', errorBody);
+          
+          // Try to parse as JSON for structured error
+          try {
+            const errorJson = JSON.parse(errorBody);
+            errorDetails = errorJson.error_description || errorJson.error || errorBody;
+          } catch {
+            errorDetails = errorBody || 'Unknown error';
+          }
+        } catch {
+          errorDetails = 'Failed to read error details';
+        }
+
+        // Handle different error types
+        if (response.status === 400) {
+          // Bad request - likely invalid token format or expired token
+          if (errorDetails.toLowerCase().includes('invalid') || 
+              errorDetails.toLowerCase().includes('malformed')) {
+            throw new Error(`Invalid token format: ${errorDetails}`);
+          } else if (errorDetails.toLowerCase().includes('expired')) {
+            throw new Error(`Token has expired: ${errorDetails}`);
+          } else {
+            throw new Error(`Invalid token: ${errorDetails}`);
+          }
+        } else if (response.status === 401) {
+          throw new Error(`Token authentication failed: ${errorDetails}`);
+        } else if (response.status === 403) {
+          throw new Error(`Token access forbidden: ${errorDetails}`);
+        } else if (response.status >= 500) {
+          // Server error - retry if we haven't reached max retries
+          const error = new Error(`Google server error (${response.status}): ${errorDetails}`);
+          error.isRetryable = true;
+          throw error;
+        } else if (response.status === 429) {
+          // Rate limited - retry after delay
+          const error = new Error(`Rate limited: ${errorDetails}`);
+          error.isRetryable = true;
+          throw error;
+        } else {
+          throw new Error(`Token validation failed (${response.status}): ${errorDetails}`);
+        }
       }
 
       const tokenInfo = await response.json();
+      console.log('Token validation successful, expires at:', new Date(tokenInfo.exp * 1000).toISOString());
       
+      // Double-check for embedded errors in successful response
       if (tokenInfo.error) {
         throw new Error(`Token validation error: ${tokenInfo.error_description || tokenInfo.error}`);
+      }
+
+      // Validate required fields
+      if (!tokenInfo.aud || !tokenInfo.exp) {
+        throw new Error('Invalid token info response: missing required fields');
       }
 
       return tokenInfo;
 
     } catch (error) {
-      console.error('Error getting token info:', error);
-      throw error;
+      console.error(`Error getting token info (attempt ${retryAttempt + 1}):`, error.message);
+      
+      // Check if we should retry
+      const shouldRetry = (
+        retryAttempt < MAX_RETRIES && 
+        (error.isRetryable || 
+         error.name === 'TypeError' || // Network errors
+         error.message.includes('network') ||
+         error.message.includes('timeout') ||
+         error.message.includes('fetch'))
+      );
+
+      if (shouldRetry) {
+        const delay = RETRY_DELAY * Math.pow(2, retryAttempt); // Exponential backoff
+        console.log(`Retrying token validation in ${delay}ms...`);
+        
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return this._getTokenInfo(token, retryAttempt + 1);
+      }
+
+      // Add context to error message
+      const contextualError = new Error(
+        `Token validation failed after ${retryAttempt + 1} attempts: ${error.message}`
+      );
+      contextualError.originalError = error;
+      throw contextualError;
     }
   }
 
@@ -413,10 +508,20 @@ class AuthManager {
       if (token) {
         // Revoke token with Google
         try {
-          await fetch(`https://oauth2.googleapis.com/revoke?token=${token}`, {
-            method: 'POST'
+          const params = new URLSearchParams({ token: token });
+          const response = await fetch('https://oauth2.googleapis.com/revoke', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            body: params.toString()
           });
-          console.log('Token revoked with Google');
+          
+          if (response.ok) {
+            console.log('Token revoked with Google successfully');
+          } else {
+            console.warn(`Token revocation failed: ${response.status} ${response.statusText}`);
+          }
         } catch (error) {
           console.warn('Error revoking token with Google:', error);
         }
@@ -436,28 +541,97 @@ class AuthManager {
 
   /**
    * Gets current user information
+   * @param {number} retryAttempt - Current retry attempt (for internal use)
    * @returns {Promise<Object>} User information
    */
-  async getUserInfo() {
+  async getUserInfo(retryAttempt = 0) {
+    const MAX_RETRIES = 2;
+    const RETRY_DELAY = 1000;
+
     try {
+      console.log(`Getting user info (attempt ${retryAttempt + 1}/${MAX_RETRIES + 1})`);
+      
       const headers = await this.getGoogleApiHeaders();
       
       const response = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
-        headers: headers
+        method: 'GET',
+        headers: {
+          ...headers,
+          'Accept': 'application/json'
+        }
       });
 
+      console.log(`User info response status: ${response.status} ${response.statusText}`);
+
       if (!response.ok) {
-        throw new Error(`Failed to get user info: ${response.status} ${response.statusText}`);
+        let errorDetails = '';
+        try {
+          const errorBody = await response.text();
+          try {
+            const errorJson = JSON.parse(errorBody);
+            errorDetails = errorJson.error_description || errorJson.error || errorBody;
+          } catch {
+            errorDetails = errorBody || 'Unknown error';
+          }
+        } catch {
+          errorDetails = 'Failed to read error details';
+        }
+
+        // Handle different error types
+        if (response.status === 401) {
+          throw new Error(`Authentication failed: ${errorDetails}`);
+        } else if (response.status === 403) {
+          throw new Error(`Access forbidden: ${errorDetails}`);
+        } else if (response.status >= 500) {
+          const error = new Error(`Google server error (${response.status}): ${errorDetails}`);
+          error.isRetryable = true;
+          throw error;
+        } else if (response.status === 429) {
+          const error = new Error(`Rate limited: ${errorDetails}`);
+          error.isRetryable = true;
+          throw error;
+        } else {
+          throw new Error(`Failed to get user info (${response.status}): ${errorDetails}`);
+        }
       }
 
       const userInfo = await response.json();
-      console.log('User info retrieved successfully');
+      console.log('User info retrieved successfully:', { email: userInfo.email, name: userInfo.name });
+
+      // Validate required fields
+      if (!userInfo.email) {
+        throw new Error('Invalid user info response: missing email');
+      }
 
       return userInfo;
 
     } catch (error) {
-      console.error('Error getting user info:', error);
-      throw error;
+      console.error(`Error getting user info (attempt ${retryAttempt + 1}):`, error.message);
+      
+      // Check if we should retry
+      const shouldRetry = (
+        retryAttempt < MAX_RETRIES && 
+        (error.isRetryable || 
+         error.name === 'TypeError' || // Network errors
+         error.message.includes('network') ||
+         error.message.includes('timeout') ||
+         error.message.includes('fetch'))
+      );
+
+      if (shouldRetry) {
+        const delay = RETRY_DELAY * Math.pow(2, retryAttempt);
+        console.log(`Retrying user info request in ${delay}ms...`);
+        
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return this.getUserInfo(retryAttempt + 1);
+      }
+
+      // Add context to error message
+      const contextualError = new Error(
+        `Failed to get user info after ${retryAttempt + 1} attempts: ${error.message}`
+      );
+      contextualError.originalError = error;
+      throw contextualError;
     }
   }
 }
