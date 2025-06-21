@@ -1,6 +1,9 @@
 // Google Translate Starred Words Scraper - Background Service Worker
 // Manifest V3 compliant background script
 
+// Import TabManager for tab operations
+importScripts('tab-manager.js');
+
 // Default extension settings
 const DEFAULT_SETTINGS = {
   isEnabled: true,
@@ -95,6 +98,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.log('Processing alarm status request');
         const status = await getAlarmStatus();
         sendResponse({ success: true, status });
+        
+      } else if (message.action === 'getTabStatus') {
+        console.log('Processing tab status request');
+        const tabStatus = tabManager.getAllTabsStatus();
+        sendResponse({ success: true, tabStatus });
+        
+      } else if (message.action === 'cleanupAllTabs') {
+        console.log('Processing cleanup all tabs request');
+        const cleanupResult = await tabManager.cleanupAllTabs();
+        sendResponse({ success: true, cleanupResult });
         
       } else {
         console.warn('Unknown message action:', message.action);
@@ -246,16 +259,28 @@ async function getAlarmStatus() {
     const alarm = await chrome.alarms.get('scrapeStarredWords');
     const allAlarms = await chrome.alarms.getAll();
     
+    // Get tab manager status
+    const tabStatus = tabManager.getAllTabsStatus();
+    
     return {
       hasAlarm: !!alarm,
       alarmDetails: alarm,
       nextScheduledTime: alarm ? new Date(alarm.scheduledTime).toISOString() : null,
       totalAlarms: allAlarms.length,
-      allAlarmNames: allAlarms.map(a => a.name)
+      allAlarmNames: allAlarms.map(a => a.name),
+      tabManager: {
+        activeTabs: tabStatus.totalTabs,
+        tabStates: tabStatus.states,
+        tabs: tabStatus.tabs
+      }
     };
   } catch (error) {
     console.error('Error getting alarm status:', error);
-    return { hasAlarm: false, error: error.message };
+    return { 
+      hasAlarm: false, 
+      error: error.message,
+      tabManager: { activeTabs: 0, tabStates: {}, tabs: [] }
+    };
   }
 }
 
@@ -314,46 +339,90 @@ async function performManualScraping() {
 }
 
 async function executeScraping(triggerType) {
+  let tabResult = null;
+  
   try {
     const startTime = Date.now();
-    console.log(`Executing ${triggerType} scraping...`);
+    console.log(`Executing ${triggerType} scraping with TabManager...`);
     
     // Get current settings
     const settings = await getSettings();
     
-    // TODO: Implement actual scraping logic here
-    // This will involve:
-    // 1. Finding Google Translate tabs
-    // 2. Injecting content scripts
-    // 3. Extracting starred words
-    // 4. Saving to storage
-    // 5. Syncing to Google Sheets if enabled
+    // Create hidden tab and navigate to Google Translate starred words page
+    console.log('Creating hidden tab for Google Translate scraping...');
+    tabResult = await tabManager.createAndNavigateToGoogleTranslate({
+      timeout: 45000, // 45 second timeout for scraping
+      autoCleanup: false // We'll handle cleanup manually to extract data first
+    });
     
-    // Simulate scraping for now
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    if (!tabResult.success) {
+      throw new Error(`Tab creation failed: ${tabResult.error}`);
+    }
     
-    // Update statistics
+    console.log(`Tab ${tabResult.tabId} created successfully, load time: ${tabResult.loadTime}ms`);
+    
+    // TODO: Inject content script to extract starred words
+    // This will be implemented in a future update
+    // For now, we'll simulate finding words but using real tab timing
+    
+    // Simulate word extraction delay (realistic timing)
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Simulate finding words (this will be replaced with actual extraction)
+    const wordsFound = Math.floor(Math.random() * 8) + 1; // 1-8 words
+    
+    // Update statistics with real timing
     const endTime = Date.now();
     const scrapeDuration = endTime - startTime;
     
     settings.lastScrapeTime = new Date().toISOString();
-    settings.totalWordsScraped = (settings.totalWordsScraped || 0) + Math.floor(Math.random() * 5); // Simulate finding words
+    settings.totalWordsScraped = (settings.totalWordsScraped || 0) + wordsFound;
     
     await chrome.storage.local.set({ settings });
     
-    console.log(`${triggerType} scraping completed in ${scrapeDuration}ms`);
+    console.log(`${triggerType} scraping completed successfully in ${scrapeDuration}ms, found ${wordsFound} words`);
+    
+    // Clean up the tab
+    try {
+      await tabManager.cleanupTab(tabResult.tabId);
+      console.log(`Tab ${tabResult.tabId} cleaned up successfully`);
+    } catch (cleanupError) {
+      console.error(`Error cleaning up tab ${tabResult.tabId}:`, cleanupError);
+      // Don't fail the entire operation for cleanup errors
+    }
     
     return { 
       success: true, 
       triggerType,
       duration: scrapeDuration,
-      wordsFound: Math.floor(Math.random() * 5),
-      data: { lastScrapeTime: settings.lastScrapeTime }
+      wordsFound: wordsFound,
+      tabLoadTime: tabResult.loadTime,
+      tabId: tabResult.tabId,
+      data: { 
+        lastScrapeTime: settings.lastScrapeTime,
+        totalWordsScraped: settings.totalWordsScraped
+      }
     };
     
   } catch (error) {
     console.error(`Error during ${triggerType} scraping:`, error);
-    return { success: false, error: error.message, triggerType };
+    
+    // Ensure tab cleanup on error
+    if (tabResult && tabResult.tabId) {
+      try {
+        await tabManager.cleanupTab(tabResult.tabId);
+        console.log(`Tab ${tabResult.tabId} cleaned up after error`);
+      } catch (cleanupError) {
+        console.error(`Error cleaning up tab ${tabResult.tabId} after scraping error:`, cleanupError);
+      }
+    }
+    
+    return { 
+      success: false, 
+      error: error.message, 
+      triggerType,
+      tabError: tabResult ? tabResult.error : null
+    };
   }
 }
 
@@ -444,13 +513,51 @@ async function logAlarmError(error, alarm) {
 }
 
 // Error handling for service worker termination
-self.addEventListener('error', (event) => {
+self.addEventListener('error', async (event) => {
   console.error('Service worker error:', event.error);
+  
+  // Cleanup tabs on critical errors
+  try {
+    await cleanupTabsOnError();
+  } catch (cleanupError) {
+    console.error('Error during emergency tab cleanup:', cleanupError);
+  }
 });
 
-self.addEventListener('unhandledrejection', (event) => {
+self.addEventListener('unhandledrejection', async (event) => {
   console.error('Unhandled promise rejection:', event.reason);
+  
+  // Cleanup tabs on unhandled rejections
+  try {
+    await cleanupTabsOnError();
+  } catch (cleanupError) {
+    console.error('Error during emergency tab cleanup:', cleanupError);
+  }
 });
+
+// Add beforeunload equivalent for service workers
+self.addEventListener('beforeunload', async (event) => {
+  console.log('Service worker shutting down, cleaning up tabs...');
+  try {
+    await tabManager.cleanupAllTabs();
+  } catch (error) {
+    console.error('Error cleaning up tabs on shutdown:', error);
+  }
+});
+
+// Emergency tab cleanup function
+async function cleanupTabsOnError() {
+  try {
+    const tabStatus = tabManager.getAllTabsStatus();
+    if (tabStatus.totalTabs > 0) {
+      console.log(`Emergency cleanup: found ${tabStatus.totalTabs} active tabs`);
+      const result = await tabManager.cleanupAllTabs();
+      console.log('Emergency tab cleanup completed:', result);
+    }
+  } catch (error) {
+    console.error('Emergency tab cleanup failed:', error);
+  }
+}
 
 // Initialize when service worker loads
 console.log('Background service worker loaded and ready');
@@ -489,5 +596,31 @@ async function checkAndRecreateAlarms() {
   }
 }
 
-// Immediate alarm check on service worker load
-checkAndRecreateAlarms(); 
+// Initialize TabManager and perform startup checks
+async function initializeServiceWorker() {
+  try {
+    console.log('Initializing service worker with TabManager...');
+    
+    // Ensure TabManager is ready
+    if (typeof tabManager === 'undefined') {
+      throw new Error('TabManager not available - check tab-manager.js import');
+    }
+    
+    // Clean up any orphaned tabs from previous session
+    const cleanupResult = await tabManager.cleanupAllTabs();
+    if (cleanupResult.total > 0) {
+      console.log(`Cleaned up ${cleanupResult.successful} orphaned tabs from previous session`);
+    }
+    
+    // Check and recreate alarms
+    await checkAndRecreateAlarms();
+    
+    console.log('Service worker initialization completed successfully');
+    
+  } catch (error) {
+    console.error('Error during service worker initialization:', error);
+  }
+}
+
+// Immediate initialization on service worker load
+initializeServiceWorker(); 
