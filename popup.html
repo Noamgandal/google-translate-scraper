@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Google Translate Starred Words Scraper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <h1 class="title">Translate Scraper</h1>
+      <p class="subtitle">Starred Words Manager</p>
+    </header>
+
+    <!-- Status Section -->
+    <section class="status-section">
+      <div class="status-card">
+        <h3>Status</h3>
+        <div class="status-item">
+          <span class="status-label">Extension:</span>
+          <span id="extensionStatus" class="status-value">Loading...</span>
+        </div>
+        <div class="status-item">
+          <span class="status-label">Last Scrape:</span>
+          <span id="lastScrapeTime" class="status-value">Never</span>
+        </div>
+        <div class="status-item">
+          <span class="status-label">Words Scraped:</span>
+          <span id="wordCount" class="status-value">0</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Settings Form -->
+    <form id="settingsForm" class="settings-form">
+      <!-- Auto-Scraping Toggle -->
+      <div class="form-group">
+        <label class="toggle-label">
+          <input type="checkbox" id="enableScraping" class="toggle-input">
+          <span class="toggle-slider"></span>
+          <span class="toggle-text">Enable Auto-Scraping</span>
+        </label>
+      </div>
+
+      <!-- Scrape Interval -->
+      <div class="form-group">
+        <label for="scrapeInterval" class="form-label">Scrape Interval</label>
+        <select id="scrapeInterval" class="form-select">
+          <option value="15">Every 15 minutes</option>
+          <option value="30" selected>Every 30 minutes</option>
+          <option value="60">Every 1 hour</option>
+          <option value="360">Every 6 hours</option>
+        </select>
+      </div>
+
+      <!-- Google Sheets ID -->
+      <div class="form-group">
+        <label for="googleSheetsId" class="form-label">Google Sheets ID</label>
+        <input 
+          type="text" 
+          id="googleSheetsId" 
+          class="form-input" 
+          placeholder="Enter your Google Sheets ID"
+          title="Find this in your Google Sheets URL"
+        >
+        <small class="form-hint">
+          Find this ID in your Google Sheets URL between /d/ and /edit
+        </small>
+        <div id="sheetsIdError" class="error-message" style="display: none;"></div>
+      </div>
+
+      <!-- Auto-Sync Toggle -->
+      <div class="form-group">
+        <label class="toggle-label">
+          <input type="checkbox" id="autoSync" class="toggle-input">
+          <span class="toggle-slider"></span>
+          <span class="toggle-text">Auto-sync to Google Sheets</span>
+        </label>
+      </div>
+
+      <!-- Notifications Toggle -->
+      <div class="form-group">
+        <label class="toggle-label">
+          <input type="checkbox" id="notifications" class="toggle-input">
+          <span class="toggle-slider"></span>
+          <span class="toggle-text">Show notifications</span>
+        </label>
+      </div>
+    </form>
+
+    <!-- Action Buttons -->
+    <div class="action-buttons">
+      <button id="saveSettings" class="btn btn-primary">
+        <span class="btn-text">Save Settings</span>
+        <span id="saveSpinner" class="spinner" style="display: none;"></span>
+      </button>
+      <button id="manualScrape" class="btn btn-secondary">
+        <span class="btn-text">Scrape Now</span>
+        <span id="scrapeSpinner" class="spinner" style="display: none;"></span>
+      </button>
+    </div>
+
+    <!-- Success/Error Messages -->
+    <div id="messageContainer" class="message-container" style="display: none;">
+      <div id="messageText" class="message-text"></div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <p>Version 1.0 | <a href="#" id="helpLink">Help</a></p>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html> 
