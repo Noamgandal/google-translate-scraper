@@ -429,16 +429,35 @@ class TabManager {
 // Export singleton instance
 const tabManager = new TabManager();
 
-// Export constants and class for use in other modules
+// Export constants and class for use in different environments
 if (typeof module !== 'undefined' && module.exports) {
   // Node.js environment
   module.exports = { TabManager, tabManager, TAB_CONFIG, TAB_STATES };
 } else {
-  // Browser environment - attach to window
-  window.TabManager = TabManager;
-  window.tabManager = tabManager;
-  window.TAB_CONFIG = TAB_CONFIG;
-  window.TAB_STATES = TAB_STATES;
+  // Determine the global object based on environment
+  let globalObj;
+  
+  if (typeof globalThis !== 'undefined') {
+    // Modern environments (service workers, browsers)
+    globalObj = globalThis;
+  } else if (typeof self !== 'undefined') {
+    // Service worker or web worker environment
+    globalObj = self;
+  } else if (typeof window !== 'undefined') {
+    // Browser environment (popup, content scripts)
+    globalObj = window;
+  } else {
+    // Fallback - create a minimal global object
+    globalObj = {};
+  }
+  
+  // Attach to the appropriate global object
+  globalObj.TabManager = TabManager;
+  globalObj.tabManager = tabManager;
+  globalObj.TAB_CONFIG = TAB_CONFIG;
+  globalObj.TAB_STATES = TAB_STATES;
+  
+  console.log('Tab Manager attached to global object:', typeof globalObj);
 }
 
 console.log('Tab Manager module loaded successfully'); 
