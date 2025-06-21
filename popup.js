@@ -111,10 +111,19 @@ async function saveSettings() {
     await chrome.storage.local.set({ settings: updatedSettings });
     
     // Notify background script of settings change
-    chrome.runtime.sendMessage({ 
-      action: 'settingsUpdated', 
-      settings: updatedSettings 
-    });
+    try {
+      const response = await chrome.runtime.sendMessage({ 
+        action: 'settingsUpdated', 
+        settings: updatedSettings 
+      });
+      
+      if (response && !response.success) {
+        throw new Error('Background script rejected settings update');
+      }
+    } catch (messageError) {
+      console.error('Error communicating with background script:', messageError);
+      // Still show success since settings were saved locally
+    }
     
     showMessage('Settings saved successfully!', 'success');
     console.log('Settings saved:', updatedSettings);
@@ -239,15 +248,18 @@ async function performManualScrape() {
     const response = await chrome.runtime.sendMessage({ action: 'manualScrape' });
     
     if (response && response.success) {
-      showMessage('Scraping completed successfully!', 'success');
+      const wordsFound = response.data?.wordsFound || 0;
+      const duration = response.data?.duration || 0;
+      showMessage(`Scraping completed! Found ${wordsFound} words in ${duration}ms`, 'success');
       await updateStatus(); // Refresh status
     } else {
-      showMessage('Scraping failed. Please try again.', 'error');
+      const errorMsg = response?.error || 'Unknown error occurred';
+      showMessage(`Scraping failed: ${errorMsg}`, 'error');
     }
     
   } catch (error) {
     console.error('Error performing manual scrape:', error);
-    showMessage('Failed to start scraping', 'error');
+    showMessage('Failed to communicate with background script', 'error');
   } finally {
     showSpinner('scrape', false);
   }
