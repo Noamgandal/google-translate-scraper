@@ -116,22 +116,92 @@ class AuthManager {
   }
 
   /**
+   * Extracts and validates a token string from Chrome Identity API response
+   * @param {string|Object} tokenResult - Raw result from chrome.identity.getAuthToken
+   * @returns {string} Validated token string
+   * @private
+   */
+  _extractTokenFromResult(tokenResult) {
+    if (!tokenResult) {
+      throw new Error('No token result provided');
+    }
+
+    let extractedToken;
+    
+    if (typeof tokenResult === 'string') {
+      // Direct string token (most common case)
+      extractedToken = tokenResult;
+      console.log('Token received as string');
+    } else if (typeof tokenResult === 'object' && tokenResult !== null) {
+      // Object with token property (Manifest V3 in some Chrome versions)
+      if (tokenResult.token && typeof tokenResult.token === 'string') {
+        extractedToken = tokenResult.token;
+        console.log('Token extracted from object.token property');
+      } else if (tokenResult.access_token && typeof tokenResult.access_token === 'string') {
+        extractedToken = tokenResult.access_token;
+        console.log('Token extracted from object.access_token property');
+      } else {
+        console.error('Invalid token object structure:', Object.keys(tokenResult));
+        throw new Error('Invalid token object: missing token or access_token property');
+      }
+    } else {
+      console.error('Invalid token type received:', typeof tokenResult);
+      throw new Error(`Invalid token type received: ${typeof tokenResult}`);
+    }
+
+    // Validate the extracted token
+    if (!extractedToken || typeof extractedToken !== 'string') {
+      throw new Error('Extracted token is not a valid string');
+    }
+
+    // Basic token format validation
+    if (extractedToken.length < 10) {
+      throw new Error('Token appears to be too short to be valid');
+    }
+
+    // Check for common token patterns
+    if (!extractedToken.match(/^[a-zA-Z0-9._-]+$/)) {
+      console.warn('Token contains unexpected characters, but proceeding...');
+    }
+
+    return extractedToken;
+  }
+
+  /**
+   * Test function for token extraction (for debugging purposes)
+   * @param {string|Object} testToken - Test token to validate extraction
+   * @returns {string} Extracted token
+   * @private
+   */
+  _testTokenExtraction(testToken) {
+    try {
+      return this._extractTokenFromResult(testToken);
+    } catch (error) {
+      console.error('Token extraction test failed:', error.message);
+      throw error;
+    }
+  }
+
+  /**
    * Requests a new token from Chrome Identity API
    * @param {boolean} interactive - Whether to show login UI
    * @returns {Promise<string>} Access token
    */
   async _requestNewToken(interactive) {
     try {
-      const token = await chrome.identity.getAuthToken({
+      console.log(`Requesting new token from Chrome Identity API (interactive: ${interactive})`);
+      
+      const tokenResult = await chrome.identity.getAuthToken({
         interactive: interactive
       });
 
-      if (!token) {
-        throw new Error('No token received from Chrome Identity API');
-      }
+      console.log('Raw token result from Chrome Identity API:', typeof tokenResult, tokenResult ? 'received' : 'null');
 
-      console.log('New token received from Chrome Identity API');
-      return token;
+      // Extract and validate the token using helper function
+      const extractedToken = this._extractTokenFromResult(tokenResult);
+
+      console.log(`New token received and validated from Chrome Identity API (length: ${extractedToken.length})`);
+      return extractedToken;
 
     } catch (error) {
       console.error('Error requesting new token:', error);
@@ -141,6 +211,10 @@ class AuthManager {
         throw new Error('OAuth2 permission not granted. Please authorize the extension.');
       } else if (error.message.includes('The user did not approve access')) {
         throw new Error('User denied authorization. Please try again and approve access.');
+      } else if (error.message.includes('User cancelled')) {
+        throw new Error('User cancelled the authorization process.');
+      } else if (error.message.includes('network')) {
+        throw new Error('Network error during authentication. Please check your connection.');
       } else {
         throw new Error(`Authentication failed: ${error.message}`);
       }
