@@ -125,6 +125,10 @@ body {
   color: var(--text-muted);
 }
 
+.status-warning {
+  color: #ea8600;
+}
+
 /* Settings Form */
 .settings-form {
   padding: 20px;

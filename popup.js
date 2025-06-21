@@ -55,8 +55,8 @@ async function initializePopup() {
     // Load current settings
     await loadSettings();
     
-    // Check authentication status
-    await checkAuthenticationStatus();
+    // Check authentication status with loading indicator
+    await checkAuthenticationStatus(true);
     
     // Update status display
     await updateStatus();
@@ -64,7 +64,7 @@ async function initializePopup() {
     // Set up periodic status updates
     setInterval(async () => {
       await updateStatus();
-      await checkAuthenticationStatus();
+      await checkAuthenticationStatus(false); // No loading indicator for periodic checks
     }, 5000); // Update every 5 seconds
     
   } catch (error) {
@@ -390,60 +390,132 @@ function getDefaultSettings() {
 
 // Authentication Functions
 
+// Global variables for authentication retry logic
+let authCheckRetryCount = 0;
+const MAX_AUTH_RETRY_ATTEMPTS = 3;
+const AUTH_RETRY_DELAY = 1000; // 1 second
+
 // Check and display authentication status
-async function checkAuthenticationStatus() {
+async function checkAuthenticationStatus(showLoading = false) {
   try {
+    if (showLoading) {
+      elements.authStatus.textContent = 'Checking...';
+      elements.authStatus.className = 'status-value';
+    }
+    
     // Send message to background script to check auth status
     const response = await chrome.runtime.sendMessage({ action: 'getAuthStatus' });
     
-    if (response && response.success) {
-      const authData = response.data;
+    if (response && response.success && response.authStatus) {
+      // Reset retry count on success
+      authCheckRetryCount = 0;
+      const authData = response.authStatus;
       updateAuthenticationUI(authData);
-    } else {
-      // Not authenticated
+    } else if (response && response.success && !response.authStatus) {
+      // Successfully contacted background, but not authenticated
+      authCheckRetryCount = 0;
       updateAuthenticationUI(null);
+    } else {
+      // Failed to get auth status, try retry logic
+      throw new Error(response?.error || 'Failed to get authentication status');
     }
     
   } catch (error) {
     console.error('Error checking authentication status:', error);
-    elements.authStatus.textContent = 'Error';
-    elements.authStatus.className = 'status-value status-disabled';
-    updateAuthenticationUI(null);
+    
+    // Implement retry logic for network/communication issues
+    if (authCheckRetryCount < MAX_AUTH_RETRY_ATTEMPTS) {
+      authCheckRetryCount++;
+      console.log(`Retrying auth status check (attempt ${authCheckRetryCount}/${MAX_AUTH_RETRY_ATTEMPTS})`);
+      
+      setTimeout(() => {
+        checkAuthenticationStatus(false);
+      }, AUTH_RETRY_DELAY * authCheckRetryCount);
+      
+      elements.authStatus.textContent = `Checking... (${authCheckRetryCount}/${MAX_AUTH_RETRY_ATTEMPTS})`;
+      elements.authStatus.className = 'status-value';
+    } else {
+      // Max retries reached
+      authCheckRetryCount = 0;
+      elements.authStatus.textContent = 'Connection Error';
+      elements.authStatus.className = 'status-value status-disabled';
+      updateAuthenticationUI(null);
+      
+      // Show error message only after max retries
+      if (showLoading) {
+        showMessage('Unable to check authentication status. Please try again.', 'error');
+      }
+    }
   }
 }
 
 // Perform authentication (sign in)
-async function performAuthentication() {
+async function performAuthentication(retryAttempt = 0) {
+  const MAX_AUTH_ATTEMPTS = 2;
+  
   try {
     showSpinner('auth', true);
-    elements.authStatus.textContent = 'Signing in...';
+    elements.authStatus.textContent = retryAttempt > 0 ? `Signing in... (${retryAttempt + 1}/${MAX_AUTH_ATTEMPTS + 1})` : 'Signing in...';
     
     // Send message to background script to authenticate
     const response = await chrome.runtime.sendMessage({ action: 'authenticate' });
     
-    if (response && response.success) {
-      const authData = response.data;
+    if (response && response.success && response.authStatus) {
+      // Authentication successful
+      const authData = response.authStatus;
       updateAuthenticationUI(authData);
       showMessage('Successfully signed in!', 'success');
       
       // Get user info for display
-      const userResponse = await chrome.runtime.sendMessage({ action: 'getUserInfo' });
-      if (userResponse && userResponse.success) {
-        updateAuthenticationUI({ ...authData, userInfo: userResponse.data });
+      try {
+        const userResponse = await chrome.runtime.sendMessage({ action: 'getUserInfo' });
+        if (userResponse && userResponse.success && userResponse.userInfo) {
+          updateAuthenticationUI({ ...authData, userInfo: userResponse.userInfo });
+        }
+      } catch (userInfoError) {
+        console.warn('Failed to get user info, but auth was successful:', userInfoError);
+        // Don't fail the entire auth process for user info errors
       }
       
     } else {
+      // Authentication failed
       const errorMsg = response?.error || 'Authentication failed';
+      
+      // Check if we should retry
+      if (retryAttempt < MAX_AUTH_ATTEMPTS && isRetryableError(errorMsg)) {
+        console.log(`Authentication failed, retrying... (attempt ${retryAttempt + 1}/${MAX_AUTH_ATTEMPTS})`);
+        setTimeout(() => {
+          performAuthentication(retryAttempt + 1);
+        }, AUTH_RETRY_DELAY * (retryAttempt + 1));
+        return; // Don't show error message yet
+      }
+      
+      // Show final error message
       showMessage(`Authentication failed: ${errorMsg}`, 'error');
       updateAuthenticationUI(null);
     }
     
   } catch (error) {
     console.error('Error during authentication:', error);
-    showMessage('Authentication error occurred', 'error');
+    
+    // Check if we should retry for network errors
+    if (retryAttempt < MAX_AUTH_ATTEMPTS && isNetworkError(error)) {
+      console.log(`Network error during auth, retrying... (attempt ${retryAttempt + 1}/${MAX_AUTH_ATTEMPTS})`);
+      setTimeout(() => {
+        performAuthentication(retryAttempt + 1);
+      }, AUTH_RETRY_DELAY * (retryAttempt + 1));
+      return; // Don't show error message yet
+    }
+    
+    // Show final error message
+    const errorMsg = getErrorMessage(error);
+    showMessage(`Authentication error: ${errorMsg}`, 'error');
     updateAuthenticationUI(null);
   } finally {
-    showSpinner('auth', false);
+    // Only hide spinner if this is the final attempt
+    if (retryAttempt >= MAX_AUTH_ATTEMPTS || elements.authStatus.textContent.includes('Authenticated')) {
+      showSpinner('auth', false);
+    }
   }
 }
 
@@ -462,68 +534,171 @@ async function clearAuthentication() {
     } else {
       const errorMsg = response?.error || 'Sign out failed';
       showMessage(`Sign out failed: ${errorMsg}`, 'error');
+      // Even if sign out failed on server, clear local UI state
+      updateAuthenticationUI(null);
     }
     
   } catch (error) {
     console.error('Error during sign out:', error);
-    showMessage('Sign out error occurred', 'error');
+    const errorMsg = getErrorMessage(error);
+    showMessage(`Sign out error: ${errorMsg}`, 'error');
+    // Even if there was an error, clear local UI state
+    updateAuthenticationUI(null);
   } finally {
     showSpinner('auth', false);
   }
 }
 
+// Helper function to determine if an error is retryable
+function isRetryableError(errorMsg) {
+  const retryableErrors = [
+    'network error',
+    'timeout',
+    'connection failed',
+    'server error',
+    'rate limit',
+    'temporary failure'
+  ];
+  
+  const lowerErrorMsg = errorMsg.toLowerCase();
+  return retryableErrors.some(error => lowerErrorMsg.includes(error));
+}
+
+// Helper function to determine if an error is a network error
+function isNetworkError(error) {
+  const networkErrors = [
+    'network error',
+    'fetch error',
+    'connection refused',
+    'connection timeout',
+    'dns error',
+    'no internet'
+  ];
+  
+  const errorMsg = error.message?.toLowerCase() || error.toString().toLowerCase();
+  return networkErrors.some(netError => errorMsg.includes(netError)) || 
+         error.name === 'NetworkError' || 
+         error.name === 'TypeError';
+}
+
+// Helper function to get user-friendly error messages
+function getErrorMessage(error) {
+  if (!error) return 'Unknown error';
+  
+  if (typeof error === 'string') return error;
+  
+  if (error.message) {
+    // Convert technical errors to user-friendly messages
+    const msg = error.message.toLowerCase();
+    if (msg.includes('network')) return 'Network connection error';
+    if (msg.includes('timeout')) return 'Request timed out';
+    if (msg.includes('permission')) return 'Permission denied';
+    if (msg.includes('blocked')) return 'Request was blocked';
+    return error.message;
+  }
+  
+  return 'Unexpected error occurred';
+}
+
 // Update UI based on authentication state
 function updateAuthenticationUI(authData) {
-  if (authData && authData.isAuthenticated) {
-    // User is authenticated
-    elements.authStatus.textContent = 'Authenticated';
-    elements.authStatus.className = 'status-value status-enabled';
-    
-    // Show sign out button, hide sign in button
-    elements.signInButton.style.display = 'none';
-    elements.signOutButton.style.display = 'block';
-    
-    // Show user email if available
-    if (authData.userInfo && authData.userInfo.email) {
-      elements.userEmail.textContent = authData.userInfo.email;
-      elements.userEmailItem.style.display = 'flex';
-    } else {
-      elements.userEmailItem.style.display = 'none';
-    }
-    
-    // Show token expiry if available
-    if (authData.tokenExpiry) {
-      const expiryDate = new Date(authData.tokenExpiry);
-      const now = new Date();
-      const timeUntilExpiry = Math.floor((expiryDate - now) / (1000 * 60)); // minutes
+  try {
+    if (authData && authData.isAuthenticated) {
+      // User is authenticated
+      elements.authStatus.textContent = 'Authenticated';
+      elements.authStatus.className = 'status-value status-enabled';
       
-      if (timeUntilExpiry > 0) {
-        if (timeUntilExpiry < 60) {
-          elements.tokenExpiry.textContent = `${timeUntilExpiry} minutes`;
-        } else {
-          const hours = Math.floor(timeUntilExpiry / 60);
-          elements.tokenExpiry.textContent = `${hours} hour${hours !== 1 ? 's' : ''}`;
-        }
-        elements.tokenExpiry.className = 'status-value';
+      // Show sign out button, hide sign in button
+      elements.signInButton.style.display = 'none';
+      elements.signOutButton.style.display = 'block';
+      
+      // Show user email if available
+      if (authData.userInfo && authData.userInfo.email) {
+        elements.userEmail.textContent = authData.userInfo.email;
+        elements.userEmailItem.style.display = 'flex';
+      } else if (authData.email) {
+        // Fallback to direct email property
+        elements.userEmail.textContent = authData.email;
+        elements.userEmailItem.style.display = 'flex';
       } else {
-        elements.tokenExpiry.textContent = 'Expired';
-        elements.tokenExpiry.className = 'status-value status-disabled';
+        elements.userEmailItem.style.display = 'none';
       }
-      elements.tokenExpiryItem.style.display = 'flex';
+      
+      // Show token expiry if available
+      if (authData.tokenExpiry || authData.expiresAt) {
+        const expiryTime = authData.tokenExpiry || authData.expiresAt;
+        const expiryDate = new Date(expiryTime);
+        const now = new Date();
+        const timeUntilExpiry = Math.floor((expiryDate - now) / (1000 * 60)); // minutes
+        
+        if (timeUntilExpiry > 0) {
+          if (timeUntilExpiry < 60) {
+            elements.tokenExpiry.textContent = `${timeUntilExpiry} minutes`;
+            // Show warning if expiring soon (less than 10 minutes)
+            elements.tokenExpiry.className = timeUntilExpiry < 10 ? 'status-value status-warning' : 'status-value';
+          } else {
+            const hours = Math.floor(timeUntilExpiry / 60);
+            elements.tokenExpiry.textContent = `${hours} hour${hours !== 1 ? 's' : ''}`;
+            elements.tokenExpiry.className = 'status-value';
+          }
+        } else {
+          elements.tokenExpiry.textContent = 'Expired';
+          elements.tokenExpiry.className = 'status-value status-disabled';
+        }
+        elements.tokenExpiryItem.style.display = 'flex';
+      } else {
+        elements.tokenExpiryItem.style.display = 'none';
+      }
+      
+    } else if (authData === null || authData === undefined) {
+      // User is not authenticated (explicit)
+      elements.authStatus.textContent = 'Not authenticated';
+      elements.authStatus.className = 'status-value status-disabled';
+      
+      // Show sign in button, hide sign out button
+      elements.signInButton.style.display = 'block';
+      elements.signOutButton.style.display = 'none';
+      
+      // Hide user info
+      elements.userEmailItem.style.display = 'none';
+      elements.tokenExpiryItem.style.display = 'none';
+      
+    } else if (authData.isAuthenticated === false) {
+      // Explicitly not authenticated
+      elements.authStatus.textContent = 'Not authenticated';
+      elements.authStatus.className = 'status-value status-disabled';
+      
+      // Show sign in button, hide sign out button
+      elements.signInButton.style.display = 'block';
+      elements.signOutButton.style.display = 'none';
+      
+      // Hide user info
+      elements.userEmailItem.style.display = 'none';
+      elements.tokenExpiryItem.style.display = 'none';
+      
     } else {
+      // Unknown auth state
+      console.warn('Unknown authentication state:', authData);
+      elements.authStatus.textContent = 'Unknown state';
+      elements.authStatus.className = 'status-value status-disabled';
+      
+      // Default to showing sign in button
+      elements.signInButton.style.display = 'block';
+      elements.signOutButton.style.display = 'none';
+      
+      // Hide user info
+      elements.userEmailItem.style.display = 'none';
       elements.tokenExpiryItem.style.display = 'none';
     }
     
-  } else {
-    // User is not authenticated
-    elements.authStatus.textContent = 'Not authenticated';
-    elements.authStatus.className = 'status-value status-disabled';
+  } catch (error) {
+    console.error('Error updating authentication UI:', error);
     
-    // Show sign in button, hide sign out button
+    // Fallback UI state
+    elements.authStatus.textContent = 'UI Error';
+    elements.authStatus.className = 'status-value status-disabled';
     elements.signInButton.style.display = 'block';
     elements.signOutButton.style.display = 'none';
-    
-    // Hide user info
     elements.userEmailItem.style.display = 'none';
     elements.tokenExpiryItem.style.display = 'none';
   }
@@ -541,7 +716,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       showMessage('Scraping failed', 'error');
     }
   } else if (message.action === 'authStatusChanged') {
-    checkAuthenticationStatus();
+    checkAuthenticationStatus(false); // Don't show loading for automatic updates
   }
 });
 
