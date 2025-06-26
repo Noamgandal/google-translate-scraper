@@ -7,6 +7,12 @@ importScripts('tab-manager.js');
 // Import AuthManager for Google OAuth authentication
 importScripts('auth.js');
 
+// Import ScrapingController for comprehensive scraping operations
+importScripts('scraper.js');
+
+// Import DataProcessor for data cleaning and validation
+importScripts('data-processor.js');
+
 // Default extension settings
 const DEFAULT_SETTINGS = {
   isEnabled: true,
@@ -15,7 +21,20 @@ const DEFAULT_SETTINGS = {
   totalWordsScraped: 0,
   googleSheetsId: '',
   autoSync: true,
-  notifications: true
+  notifications: true,
+  // Enhanced scraping statistics
+  scrapingStats: {
+    totalAttempts: 0,
+    successfulAttempts: 0,
+    failedAttempts: 0,
+    totalWordsFound: 0,
+    averageWordsPerScrape: 0,
+    averageScrapingTime: 0,
+    lastSuccessfulScrape: null,
+    lastFailedScrape: null,
+    duplicatesRemoved: 0,
+    dataValidationErrors: 0
+  }
 };
 
 // Extension lifecycle event listeners
@@ -94,7 +113,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ 
           success: result.success, 
           data: result.data,
-          error: result.error
+          error: result.error,
+          metrics: result.metrics,
+          processing: result.processing,
+          performance: result.performance,
+          totalDuration: result.totalDuration,
+          attempt: result.attempt
         });
         
       } else if (message.action === 'getAlarmStatus') {
@@ -131,6 +155,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.log('Processing get user info request');
         const userInfoResult = await handleGetUserInfo();
         sendResponse(userInfoResult);
+        
+      } else if (message.action === 'getScrapingStats') {
+        console.log('Processing get scraping statistics request');
+        const statsResult = await getScrapingStatistics();
+        sendResponse(statsResult);
+        
+      } else if (message.action === 'getScrapedData') {
+        console.log('Processing get scraped data request');
+        const dataResult = await getScrapedDataSummary();
+        sendResponse(dataResult);
+        
+      } else if (message.action === 'resetScrapingStats') {
+        console.log('Processing reset scraping statistics request');
+        const resetResult = await resetScrapingStatistics();
+        sendResponse(resetResult);
         
       } else {
         console.warn('Unknown message action:', message.action);
@@ -322,7 +361,7 @@ async function performScheduledScraping() {
       return { success: false, reason: 'disabled' };
     }
     
-    const result = await executeScraping('scheduled');
+    const result = await executeScrapingWithController('scheduled');
     
     // Send status update to popup if open
     try {
@@ -331,6 +370,7 @@ async function performScheduledScraping() {
         success: result.success,
         type: 'scheduled',
         data: result.data,
+        metrics: result.metrics,
         timestamp: new Date().toISOString()
       });
       console.log('Status update sent to popup');
@@ -343,6 +383,7 @@ async function performScheduledScraping() {
     
   } catch (error) {
     console.error('Error during scheduled scraping:', error);
+    await updateScrapingStats('scheduled', false, 0, 0, error);
     return { success: false, error: error.message };
   }
 }
@@ -351,111 +392,262 @@ async function performManualScraping() {
   try {
     console.log('Starting manual scraping triggered by user...');
     
-    const result = await executeScraping('manual');
+    const result = await executeScrapingWithController('manual');
     
     return result;
     
   } catch (error) {
     console.error('Error during manual scraping:', error);
+    await updateScrapingStats('manual', false, 0, 0, error);
     return { success: false, error: error.message };
   }
 }
 
-async function executeScraping(triggerType) {
-  let tabResult = null;
+// New comprehensive scraping function using ScrapingController
+async function executeScrapingWithController(triggerType) {
+  console.log(`Starting ${triggerType} scraping with ScrapingController...`);
   
   try {
-    const startTime = Date.now();
-    console.log(`Executing ${triggerType} scraping with TabManager...`);
-    
     // Check authentication before scraping
     console.log('Checking authentication status before scraping...');
     const authStatus = await checkAuthenticationForScraping();
     
     if (!authStatus.success) {
-      throw new Error(`Authentication required for scraping: ${authStatus.error}`);
+      console.warn(`Authentication not available: ${authStatus.error}. Proceeding with limited functionality.`);
+    } else {
+      console.log(`Authentication verified for user: ${authStatus.user?.email || 'unknown'}`);
     }
     
-    console.log(`Authentication verified for user: ${authStatus.user?.email || 'unknown'}`);
+    // Initialize ScrapingController
+    const scrapingController = new ScrapingController();
     
-    // Get current settings
-    const settings = await getSettings();
+    // Execute scraping with the controller
+    console.log('Executing scraping with ScrapingController...');
+    const scrapingResult = await scrapingController.executeGoogleTranslateScraping();
     
-    // Create hidden tab and navigate to Google Translate starred words page
-    console.log('Creating hidden tab for Google Translate scraping...');
-    tabResult = await tabManager.createAndNavigateToGoogleTranslate({
-      timeout: 45000, // 45 second timeout for scraping
-      autoCleanup: false // We'll handle cleanup manually to extract data first
-    });
-    
-    if (!tabResult.success) {
-      throw new Error(`Tab creation failed: ${tabResult.error}`);
+    if (!scrapingResult.success) {
+      throw new Error(`Scraping failed: ${scrapingResult.error}`);
     }
     
-    console.log(`Tab ${tabResult.tabId} created successfully, load time: ${tabResult.loadTime}ms`);
+    console.log(`Scraping completed successfully in ${scrapingResult.totalDuration.toFixed(2)}ms`);
+    console.log(`Raw data extracted: ${scrapingResult.data.count} words`);
     
-    // TODO: Inject content script to extract starred words
-    // This will be implemented in a future update
-    // For now, we'll simulate finding words but using real tab timing
+    // Process the scraped data with DataProcessor
+    const processedData = await processScrapedData(scrapingResult.data);
     
-    // Simulate word extraction delay (realistic timing)
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // Simulate finding words (this will be replaced with actual extraction)
-    const wordsFound = Math.floor(Math.random() * 8) + 1; // 1-8 words
-    
-    // Update statistics with real timing
-    const endTime = Date.now();
-    const scrapeDuration = endTime - startTime;
-    
-    settings.lastScrapeTime = new Date().toISOString();
-    settings.totalWordsScraped = (settings.totalWordsScraped || 0) + wordsFound;
-    
-    await chrome.storage.local.set({ settings });
-    
-    console.log(`${triggerType} scraping completed successfully in ${scrapeDuration}ms, found ${wordsFound} words`);
-    
-    // Clean up the tab
-    try {
-      await tabManager.cleanupTab(tabResult.tabId);
-      console.log(`Tab ${tabResult.tabId} cleaned up successfully`);
-    } catch (cleanupError) {
-      console.error(`Error cleaning up tab ${tabResult.tabId}:`, cleanupError);
-      // Don't fail the entire operation for cleanup errors
+    if (!processedData.success) {
+      console.warn(`Data processing had issues: ${processedData.error}`);
     }
     
-    return { 
-      success: true, 
+    // Store the processed data
+    await storeScrapedData(processedData.data, triggerType);
+    
+    // Update scraping statistics
+    await updateScrapingStats(
+      triggerType, 
+      true, 
+      scrapingResult.totalDuration, 
+      processedData.data?.words?.length || 0
+    );
+    
+    console.log(`${triggerType} scraping pipeline completed successfully`);
+    
+    return {
+      success: true,
       triggerType,
-      duration: scrapeDuration,
-      wordsFound: wordsFound,
-      tabLoadTime: tabResult.loadTime,
-      tabId: tabResult.tabId,
-      data: { 
-        lastScrapeTime: settings.lastScrapeTime,
-        totalWordsScraped: settings.totalWordsScraped
+      totalDuration: scrapingResult.totalDuration,
+      attempt: scrapingResult.attempt,
+      data: {
+        count: processedData.data?.words?.length || 0,
+        raw: scrapingResult.data.raw,
+        validated: processedData.data,
+        lastScrapeTime: new Date().toISOString()
+      },
+      metrics: scrapingResult.metrics,
+      performance: scrapingResult.performance,
+      processing: {
+        success: processedData.success,
+        duplicatesRemoved: processedData.duplicatesRemoved || 0,
+        validationErrors: processedData.validationErrors || 0
       }
     };
     
   } catch (error) {
     console.error(`Error during ${triggerType} scraping:`, error);
     
-    // Ensure tab cleanup on error
-    if (tabResult && tabResult.tabId) {
-      try {
-        await tabManager.cleanupTab(tabResult.tabId);
-        console.log(`Tab ${tabResult.tabId} cleaned up after error`);
-      } catch (cleanupError) {
-        console.error(`Error cleaning up tab ${tabResult.tabId} after scraping error:`, cleanupError);
-      }
+    // Update error statistics
+    await updateScrapingStats(triggerType, false, 0, 0, error);
+    
+    return {
+      success: false,
+      error: error.message,
+      triggerType,
+      timestamp: new Date().toISOString()
+    };
+  }
+}
+
+// Process scraped data with DataProcessor
+async function processScrapedData(rawData) {
+  try {
+    console.log('Processing scraped data with DataProcessor...');
+    
+    if (!rawData || !rawData.validated || !rawData.validated.words) {
+      throw new Error('No valid words data found in scraping results');
     }
     
-    return { 
-      success: false, 
-      error: error.message, 
-      triggerType,
-      tabError: tabResult ? tabResult.error : null
+    const words = rawData.validated.words;
+    console.log(`Processing ${words.length} raw words...`);
+    
+    // Step 1: Clean and validate words
+    const cleanResult = await DataProcessor.cleanAndValidateWords(words);
+    if (!cleanResult.success) {
+      throw new Error(`Data cleaning failed: ${cleanResult.error}`);
+    }
+    
+    console.log(`Cleaned words: ${cleanResult.cleanedCount}/${cleanResult.originalCount}`);
+    
+    // Step 2: Remove duplicates
+    const dedupeResult = await DataProcessor.removeDuplicates(cleanResult.words, 'language_pair');
+    if (!dedupeResult.success) {
+      console.warn(`Deduplication failed: ${dedupeResult.error}`);
+    } else {
+      console.log(`Removed ${dedupeResult.duplicatesRemoved} duplicates`);
+    }
+    
+    // Step 3: Get existing data and merge
+    const existingData = await getExistingScrapedData();
+    const mergeResult = await DataProcessor.mergeWithExistingData(
+      dedupeResult.words || cleanResult.words, 
+      existingData, 
+      'merge_unique'
+    );
+    
+    if (!mergeResult.success) {
+      console.warn(`Data merging failed: ${mergeResult.error}`);
+    }
+    
+    // Step 4: Generate statistics
+    const statsResult = await DataProcessor.generateDataStatistics(mergeResult.words || dedupeResult.words || cleanResult.words);
+    
+    return {
+      success: true,
+      data: {
+        words: mergeResult.words || dedupeResult.words || cleanResult.words,
+        statistics: statsResult.success ? statsResult.statistics : null,
+        processing: {
+          cleaned: cleanResult.cleanedCount,
+          originalCount: cleanResult.originalCount,
+          duplicatesRemoved: dedupeResult.duplicatesRemoved || 0,
+          merged: mergeResult.mergedCount || 0,
+          errors: cleanResult.errors || []
+        }
+      },
+      duplicatesRemoved: dedupeResult.duplicatesRemoved || 0,
+      validationErrors: cleanResult.errors?.length || 0
     };
+    
+  } catch (error) {
+    console.error('Error processing scraped data:', error);
+    return {
+      success: false,
+      error: error.message,
+      data: null
+    };
+  }
+}
+
+// Store processed data in Chrome storage
+async function storeScrapedData(processedData, triggerType) {
+  try {
+    console.log('Storing processed data in Chrome storage...');
+    
+    if (!processedData || !processedData.words) {
+      throw new Error('No processed data to store');
+    }
+    
+    // Prepare data for storage
+    const storageData = {
+      words: processedData.words,
+      lastUpdate: new Date().toISOString(),
+      triggerType: triggerType,
+      statistics: processedData.statistics,
+      processing: processedData.processing
+    };
+    
+    // Store in Chrome storage
+    await chrome.storage.local.set({ 
+      scrapedWords: storageData,
+      lastSyncTime: new Date().toISOString()
+    });
+    
+    console.log(`Stored ${processedData.words.length} words in Chrome storage`);
+    
+    // Update settings with new totals
+    const settings = await getSettings();
+    settings.lastScrapeTime = storageData.lastUpdate;
+    settings.totalWordsScraped = processedData.words.length;
+    
+    await chrome.storage.local.set({ settings });
+    
+    return { success: true };
+    
+  } catch (error) {
+    console.error('Error storing scraped data:', error);
+    throw error;
+  }
+}
+
+// Get existing scraped data from storage
+async function getExistingScrapedData() {
+  try {
+    const result = await chrome.storage.local.get(['scrapedWords']);
+    return result.scrapedWords?.words || [];
+  } catch (error) {
+    console.error('Error getting existing scraped data:', error);
+    return [];
+  }
+}
+
+// Update scraping statistics
+async function updateScrapingStats(triggerType, success, duration, wordsFound, error = null) {
+  try {
+    const settings = await getSettings();
+    const stats = settings.scrapingStats || DEFAULT_SETTINGS.scrapingStats;
+    
+    // Update counters
+    stats.totalAttempts++;
+    if (success) {
+      stats.successfulAttempts++;
+      stats.totalWordsFound += wordsFound;
+      stats.lastSuccessfulScrape = new Date().toISOString();
+      
+      // Update averages
+      stats.averageWordsPerScrape = Math.round(stats.totalWordsFound / stats.successfulAttempts);
+      const currentAvgTime = stats.averageScrapingTime || 0;
+      stats.averageScrapingTime = Math.round(((currentAvgTime * (stats.successfulAttempts - 1)) + duration) / stats.successfulAttempts);
+    } else {
+      stats.failedAttempts++;
+      stats.lastFailedScrape = {
+        timestamp: new Date().toISOString(),
+        error: error?.message || 'Unknown error',
+        triggerType
+      };
+    }
+    
+    // Update settings
+    settings.scrapingStats = stats;
+    await chrome.storage.local.set({ settings });
+    
+    console.log('Scraping statistics updated:', {
+      totalAttempts: stats.totalAttempts,
+      successRate: `${((stats.successfulAttempts / stats.totalAttempts) * 100).toFixed(1)}%`,
+      avgWordsPerScrape: stats.averageWordsPerScrape,
+      avgTime: `${stats.averageScrapingTime}ms`
+    });
+    
+  } catch (error) {
+    console.error('Error updating scraping statistics:', error);
   }
 }
 
@@ -644,7 +836,17 @@ async function initializeServiceWorker() {
       throw new Error('AuthManager not available - check auth.js import');
     }
     
-    console.log('TabManager and AuthManager modules loaded successfully');
+    // Ensure ScrapingController is ready
+    if (typeof ScrapingController === 'undefined') {
+      throw new Error('ScrapingController not available - check scraper.js import');
+    }
+    
+    // Ensure DataProcessor is ready
+    if (typeof DataProcessor === 'undefined') {
+      throw new Error('DataProcessor not available - check data-processor.js import');
+    }
+    
+    console.log('All modules loaded successfully: TabManager, AuthManager, ScrapingController, DataProcessor');
     
     // Clean up any orphaned tabs from previous session
     const cleanupResult = await tabManager.cleanupAllTabs();
@@ -802,6 +1004,155 @@ async function handleGetUserInfo() {
   }
 }
 
+// New message handler functions for enhanced scraping system
+
+// Get comprehensive scraping statistics
+async function getScrapingStatistics() {
+  try {
+    console.log('Getting comprehensive scraping statistics...');
+    
+    const settings = await getSettings();
+    const scrapingStats = settings.scrapingStats || DEFAULT_SETTINGS.scrapingStats;
+    
+    // Get processor statistics if available
+    let processorStats = null;
+    try {
+      if (typeof DataProcessor !== 'undefined') {
+        processorStats = DataProcessor.getProcessorStatistics();
+      }
+    } catch (error) {
+      console.warn('Could not get DataProcessor statistics:', error);
+    }
+    
+    // Get scraping controller metrics if available
+    let controllerMetrics = null;
+    try {
+      if (typeof ScrapingController !== 'undefined') {
+        const controller = new ScrapingController();
+        controllerMetrics = controller.getScrapingMetrics();
+      }
+    } catch (error) {
+      console.warn('Could not get ScrapingController metrics:', error);
+    }
+    
+    return {
+      success: true,
+      statistics: {
+        scraping: scrapingStats,
+        processor: processorStats,
+        controller: controllerMetrics,
+        generatedAt: new Date().toISOString()
+      }
+    };
+    
+  } catch (error) {
+    console.error('Error getting scraping statistics:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// Get scraped data summary
+async function getScrapedDataSummary() {
+  try {
+    console.log('Getting scraped data summary...');
+    
+    const result = await chrome.storage.local.get(['scrapedWords']);
+    const scrapedData = result.scrapedWords;
+    
+    if (!scrapedData) {
+      return {
+        success: true,
+        data: {
+          totalWords: 0,
+          lastUpdate: null,
+          summary: null
+        }
+      };
+    }
+    
+    // Generate summary statistics
+    const summary = {
+      totalWords: scrapedData.words?.length || 0,
+      lastUpdate: scrapedData.lastUpdate,
+      triggerType: scrapedData.triggerType,
+      processing: scrapedData.processing,
+      statistics: scrapedData.statistics
+    };
+    
+    // Add recent words preview (last 5)
+    if (scrapedData.words && scrapedData.words.length > 0) {
+      summary.recentWords = scrapedData.words
+        .slice(-5)
+        .map(word => ({
+          originalText: word.originalText,
+          translatedText: word.translatedText,
+          sourceLanguage: word.sourceLanguage,
+          targetLanguage: word.targetLanguage
+        }));
+    }
+    
+    return {
+      success: true,
+      data: summary
+    };
+    
+  } catch (error) {
+    console.error('Error getting scraped data summary:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// Reset scraping statistics
+async function resetScrapingStatistics() {
+  try {
+    console.log('Resetting scraping statistics...');
+    
+    const settings = await getSettings();
+    settings.scrapingStats = { ...DEFAULT_SETTINGS.scrapingStats };
+    
+    await chrome.storage.local.set({ settings });
+    
+    // Reset processor statistics if available
+    try {
+      if (typeof DataProcessor !== 'undefined') {
+        DataProcessor.resetStatistics();
+      }
+    } catch (error) {
+      console.warn('Could not reset DataProcessor statistics:', error);
+    }
+    
+    // Reset controller metrics if available
+    try {
+      if (typeof ScrapingController !== 'undefined') {
+        const controller = new ScrapingController();
+        controller.resetMetrics();
+      }
+    } catch (error) {
+      console.warn('Could not reset ScrapingController metrics:', error);
+    }
+    
+    console.log('Scraping statistics reset successfully');
+    
+    return {
+      success: true,
+      message: 'Scraping statistics reset successfully'
+    };
+    
+  } catch (error) {
+    console.error('Error resetting scraping statistics:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
 async function checkAuthenticationForScraping() {
   try {
     console.log('Checking authentication for scraping operation...');
@@ -851,6 +1202,11 @@ async function checkAuthenticationForScraping() {
     };
   }
 }
+
+// Enhanced background script loaded with comprehensive scraping system
+console.log('Enhanced Google Translate Scraper Background Script loaded successfully');
+console.log('Modules: TabManager, AuthManager, ScrapingController, DataProcessor');
+console.log('Features: Advanced scraping, data processing, statistics tracking, error handling');
 
 // Immediate initialization on service worker load
 initializeServiceWorker(); 
