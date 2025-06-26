@@ -13,6 +13,9 @@ importScripts('scraper.js');
 // Import DataProcessor for data cleaning and validation
 importScripts('data-processor.js');
 
+// Import Google Sheets API for data synchronization
+importScripts('sheets-api.js');
+
 // Default extension settings
 const DEFAULT_SETTINGS = {
   isEnabled: true,
@@ -34,6 +37,16 @@ const DEFAULT_SETTINGS = {
     lastFailedScrape: null,
     duplicatesRemoved: 0,
     dataValidationErrors: 0
+  },
+  // Google Sheets sync status
+  sheetsSync: {
+    lastSyncTime: null,
+    lastSyncStatus: null,
+    lastSyncError: null,
+    totalSyncs: 0,
+    successfulSyncs: 0,
+    failedSyncs: 0,
+    lastSyncedWordCount: 0
   }
 };
 
@@ -170,6 +183,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.log('Processing reset scraping statistics request');
         const resetResult = await resetScrapingStatistics();
         sendResponse(resetResult);
+        
+      } else if (message.action === 'syncToSheets') {
+        console.log('Processing sync to Google Sheets request');
+        const syncResult = await syncDataToGoogleSheets();
+        sendResponse(syncResult);
+        
+      } else if (message.action === 'testSheetsAccess') {
+        console.log('Processing test sheets access request');
+        const testResult = await testGoogleSheetsAccess(message.spreadsheetId);
+        sendResponse(testResult);
+        
+      } else if (message.action === 'getSyncStatus') {
+        console.log('Processing get sync status request');
+        const syncStatus = await getGoogleSheetsSyncStatus();
+        sendResponse(syncStatus);
         
       } else {
         console.warn('Unknown message action:', message.action);
@@ -450,6 +478,22 @@ async function executeScrapingWithController(triggerType) {
       processedData.data?.words?.length || 0
     );
     
+    // Auto-sync to Google Sheets if enabled
+    const settings = await getSettings();
+    if (settings.autoSync && settings.googleSheetsId && authStatus.success) {
+      console.log('Auto-sync enabled, syncing data to Google Sheets...');
+      try {
+        const syncResult = await syncDataToGoogleSheets();
+        if (syncResult.success) {
+          console.log('Auto-sync to Google Sheets completed successfully');
+        } else {
+          console.warn('Auto-sync to Google Sheets failed:', syncResult.error);
+        }
+      } catch (syncError) {
+        console.error('Error during auto-sync to Google Sheets:', syncError);
+      }
+    }
+    
     console.log(`${triggerType} scraping pipeline completed successfully`);
     
     return {
@@ -659,6 +703,19 @@ async function handleSettingsUpdate(newSettings) {
     // Get current settings to compare
     const result = await chrome.storage.local.get(['settings']);
     const currentSettings = result.settings || DEFAULT_SETTINGS;
+    
+    // Validate Google Sheets ID if autoSync is enabled
+    if (newSettings.autoSync && newSettings.googleSheetsId) {
+      const validationResult = validateGoogleSheetsId(newSettings.googleSheetsId);
+      if (!validationResult.isValid) {
+        console.error('Invalid Google Sheets ID:', validationResult.error);
+        return { 
+          success: false, 
+          error: `Invalid Google Sheets ID: ${validationResult.error}`
+        };
+      }
+      console.log('Google Sheets ID validation passed');
+    }
     
     // Check if alarm-related settings changed
     const alarmSettingsChanged = (
@@ -1203,10 +1260,350 @@ async function checkAuthenticationForScraping() {
   }
 }
 
+// Google Sheets functionality
+
+// Validate Google Sheets ID format
+function validateGoogleSheetsId(spreadsheetId) {
+  if (!spreadsheetId || typeof spreadsheetId !== 'string') {
+    return {
+      isValid: false,
+      error: 'Spreadsheet ID is required and must be a string'
+    };
+  }
+  
+  // Remove any whitespace
+  const cleanId = spreadsheetId.trim();
+  
+  // Check length (Google Sheets IDs are 44 characters)
+  if (cleanId.length !== 44) {
+    return {
+      isValid: false,
+      error: `Spreadsheet ID must be exactly 44 characters, got ${cleanId.length}`
+    };
+  }
+  
+  // Check format (alphanumeric, hyphens, underscores)
+  const validPattern = /^[a-zA-Z0-9_-]+$/;
+  if (!validPattern.test(cleanId)) {
+    return {
+      isValid: false,
+      error: 'Spreadsheet ID contains invalid characters. Only letters, numbers, hyphens, and underscores are allowed'
+    };
+  }
+  
+  return {
+    isValid: true,
+    cleanId: cleanId
+  };
+}
+
+// Sync data to Google Sheets
+async function syncDataToGoogleSheets() {
+  console.log('Starting sync to Google Sheets...');
+  
+  try {
+    // Get settings
+    const settings = await getSettings();
+    
+    if (!settings.googleSheetsId) {
+      throw new Error('Google Sheets ID not configured');
+    }
+    
+    // Validate sheets ID
+    const validation = validateGoogleSheetsId(settings.googleSheetsId);
+    if (!validation.isValid) {
+      throw new Error(`Invalid Google Sheets ID: ${validation.error}`);
+    }
+    
+    // Check authentication
+    const authStatus = await authManager.checkAuthStatus();
+    if (!authStatus.isAuthenticated) {
+      throw new Error('User not authenticated. Please authenticate first.');
+    }
+    
+    // Get scraped data
+    const scrapedData = await getExistingScrapedData();
+    if (!scrapedData || !scrapedData.length) {
+      console.log('No scraped data to sync');
+      await updateSheetsSyncStatus('success', 0, null);
+      return {
+        success: true,
+        message: 'No data to sync',
+        wordCount: 0
+      };
+    }
+    
+    console.log(`Syncing ${scrapedData.length} words to Google Sheets...`);
+    
+    // Initialize Google Sheets API
+    const sheetsAPI = new GoogleSheetsAPI();
+    
+    // Validate sheet access
+    console.log('Validating sheet access...');
+    const accessResult = await sheetsAPI.validateSheetAccess(validation.cleanId);
+    if (!accessResult.success) {
+      throw new Error(`Cannot access Google Sheet: ${accessResult.error}`);
+    }
+    
+    // Convert data to sheets format
+    const sheetsData = convertDataToSheetsFormat(scrapedData);
+    
+    // Clear existing data
+    console.log('Clearing existing sheet data...');
+    const clearResult = await sheetsAPI.clearSheetData(validation.cleanId);
+    if (!clearResult.success) {
+      console.warn('Could not clear existing data:', clearResult.error);
+    }
+    
+    // Write new data
+    console.log('Writing new data to sheet...');
+    const writeResult = await sheetsAPI.writeDataToSheet(validation.cleanId, sheetsData);
+    if (!writeResult.success) {
+      throw new Error(`Failed to write data to sheet: ${writeResult.error}`);
+    }
+    
+    // Update sync status
+    await updateSheetsSyncStatus('success', scrapedData.length, null);
+    
+    console.log(`Successfully synced ${scrapedData.length} words to Google Sheets`);
+    
+    return {
+      success: true,
+      message: 'Data synced successfully',
+      wordCount: scrapedData.length,
+      sheetInfo: accessResult.sheetInfo
+    };
+    
+  } catch (error) {
+    console.error('Error syncing to Google Sheets:', error);
+    
+    // Store error for debugging
+    await updateSheetsSyncStatus('error', 0, error.message);
+    
+    // Store detailed error in chrome storage for debugging
+    await storeSheetsSyncError(error);
+    
+    return {
+      success: false,
+      error: error.message,
+      userFriendlyError: getUserFriendlyError(error.message)
+    };
+  }
+}
+
+// Test Google Sheets access
+async function testGoogleSheetsAccess(spreadsheetId) {
+  console.log('Testing Google Sheets access for ID:', spreadsheetId);
+  
+  try {
+    // Validate sheets ID
+    const validation = validateGoogleSheetsId(spreadsheetId);
+    if (!validation.isValid) {
+      return {
+        success: false,
+        error: validation.error
+      };
+    }
+    
+    // Check authentication
+    const authStatus = await authManager.checkAuthStatus();
+    if (!authStatus.isAuthenticated) {
+      return {
+        success: false,
+        error: 'User not authenticated. Please authenticate first.',
+        needsAuth: true
+      };
+    }
+    
+    // Test access using Google Sheets API
+    const sheetsAPI = new GoogleSheetsAPI();
+    const accessResult = await sheetsAPI.validateSheetAccess(validation.cleanId);
+    
+    if (!accessResult.success) {
+      return {
+        success: false,
+        error: accessResult.error,
+        userFriendlyError: getUserFriendlyError(accessResult.error)
+      };
+    }
+    
+    console.log('Google Sheets access test successful');
+    
+    return {
+      success: true,
+      message: 'Sheet access verified successfully',
+      sheetInfo: accessResult.sheetInfo
+    };
+    
+  } catch (error) {
+    console.error('Error testing Google Sheets access:', error);
+    return {
+      success: false,
+      error: error.message,
+      userFriendlyError: getUserFriendlyError(error.message)
+    };
+  }
+}
+
+// Get Google Sheets sync status
+async function getGoogleSheetsSyncStatus() {
+  try {
+    console.log('Getting Google Sheets sync status...');
+    
+    const settings = await getSettings();
+    const syncStatus = settings.sheetsSync || DEFAULT_SETTINGS.sheetsSync;
+    
+    return {
+      success: true,
+      syncStatus: {
+        lastSyncTime: syncStatus.lastSyncTime,
+        lastSyncStatus: syncStatus.lastSyncStatus,
+        lastSyncError: syncStatus.lastSyncError,
+        totalSyncs: syncStatus.totalSyncs,
+        successfulSyncs: syncStatus.successfulSyncs,
+        failedSyncs: syncStatus.failedSyncs,
+        lastSyncedWordCount: syncStatus.lastSyncedWordCount,
+        isConfigured: !!settings.googleSheetsId,
+        autoSyncEnabled: settings.autoSync
+      }
+    };
+    
+  } catch (error) {
+    console.error('Error getting sync status:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// Convert scraped data to Google Sheets format
+function convertDataToSheetsFormat(scrapedData) {
+  console.log('Converting data to Google Sheets format...');
+  
+  // Headers
+  const headers = [
+    'Original Text',
+    'Translated Text', 
+    'Source Language',
+    'Target Language',
+    'Extracted At'
+  ];
+  
+  // Convert each word to row format
+  const rows = scrapedData.map(word => [
+    word.originalText || '',
+    word.translatedText || '',
+    word.sourceLanguage || '',
+    word.targetLanguage || '',
+    word.extractedAt || word.timestamp || new Date().toISOString()
+  ]);
+  
+  // Combine headers and data
+  const sheetsData = [headers, ...rows];
+  
+  console.log(`Converted ${rows.length} words to sheets format`);
+  
+  return sheetsData;
+}
+
+// Update Google Sheets sync status in storage
+async function updateSheetsSyncStatus(status, wordCount, error) {
+  try {
+    const settings = await getSettings();
+    
+    if (!settings.sheetsSync) {
+      settings.sheetsSync = { ...DEFAULT_SETTINGS.sheetsSync };
+    }
+    
+    // Update sync statistics
+    settings.sheetsSync.lastSyncTime = new Date().toISOString();
+    settings.sheetsSync.lastSyncStatus = status;
+    settings.sheetsSync.lastSyncError = error;
+    settings.sheetsSync.totalSyncs += 1;
+    settings.sheetsSync.lastSyncedWordCount = wordCount;
+    
+    if (status === 'success') {
+      settings.sheetsSync.successfulSyncs += 1;
+    } else {
+      settings.sheetsSync.failedSyncs += 1;
+    }
+    
+    await chrome.storage.local.set({ settings });
+    
+    console.log('Sheets sync status updated:', {
+      status,
+      wordCount,
+      totalSyncs: settings.sheetsSync.totalSyncs,
+      successRate: `${((settings.sheetsSync.successfulSyncs / settings.sheetsSync.totalSyncs) * 100).toFixed(1)}%`
+    });
+    
+  } catch (error) {
+    console.error('Error updating sheets sync status:', error);
+  }
+}
+
+// Store detailed error information for debugging
+async function storeSheetsSyncError(error) {
+  try {
+    const errorLog = {
+      timestamp: new Date().toISOString(),
+      error: error.message,
+      stack: error.stack,
+      userAgent: navigator.userAgent
+    };
+    
+    // Get existing error logs
+    const result = await chrome.storage.local.get(['sheetsSyncErrors']);
+    const existingErrors = result.sheetsSyncErrors || [];
+    
+    // Keep only last 10 errors
+    const updatedErrors = [errorLog, ...existingErrors].slice(0, 10);
+    
+    await chrome.storage.local.set({ sheetsSyncErrors: updatedErrors });
+    console.error('Sheets sync error logged:', errorLog);
+    
+  } catch (logError) {
+    console.error('Error logging sheets sync error:', logError);
+  }
+}
+
+// Get user-friendly error messages
+function getUserFriendlyError(errorMessage) {
+  const lowerError = errorMessage.toLowerCase();
+  
+  if (lowerError.includes('permission') || lowerError.includes('403') || lowerError.includes('forbidden')) {
+    return 'Permission denied. Please check that the Google Sheet is shared with your account and allows editing.';
+  }
+  
+  if (lowerError.includes('not found') || lowerError.includes('404')) {
+    return 'Google Sheet not found. Please verify the spreadsheet ID is correct and the sheet exists.';
+  }
+  
+  if (lowerError.includes('quota') || lowerError.includes('rate limit') || lowerError.includes('429')) {
+    return 'Rate limit exceeded. Please wait a few minutes before trying again.';
+  }
+  
+  if (lowerError.includes('network') || lowerError.includes('fetch')) {
+    return 'Network error. Please check your internet connection and try again.';
+  }
+  
+  if (lowerError.includes('authentication') || lowerError.includes('unauthorized') || lowerError.includes('401')) {
+    return 'Authentication required. Please authenticate with your Google account.';
+  }
+  
+  if (lowerError.includes('invalid') && lowerError.includes('id')) {
+    return 'Invalid spreadsheet ID. Please check the ID format and try again.';
+  }
+  
+  // Default fallback
+  return 'An error occurred while syncing to Google Sheets. Please try again or check the console for details.';
+}
+
 // Enhanced background script loaded with comprehensive scraping system
 console.log('Enhanced Google Translate Scraper Background Script loaded successfully');
-console.log('Modules: TabManager, AuthManager, ScrapingController, DataProcessor');
-console.log('Features: Advanced scraping, data processing, statistics tracking, error handling');
+console.log('Modules: TabManager, AuthManager, ScrapingController, DataProcessor, GoogleSheetsAPI');
+console.log('Features: Advanced scraping, data processing, Google Sheets sync, statistics tracking, error handling');
 
 // Immediate initialization on service worker load
 initializeServiceWorker(); 
