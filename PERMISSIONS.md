@@ -154,7 +154,7 @@ connect-src 'self' https://oauth2.googleapis.com https://sheets.googleapis.com h
 ### OAuth2 Configuration
 ```json
 "oauth2": {
-  "client_id": "YOUR_GOOGLE_OAUTH_CLIENT_ID_HERE",  // MUST BE REPLACED
+  "client_id": "734462042602-7f6r7h8851tjprf7lqn5l726at886pr.apps.googleusercontent.com",
   "scopes": [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/gmail.send",
@@ -164,7 +164,7 @@ connect-src 'self' https://oauth2.googleapis.com https://sheets.googleapis.com h
 }
 ```
 
-- **Client ID**: Replace placeholder with actual Google OAuth client ID
+- **Client ID**: Google OAuth client ID configured for this extension
 - **Minimal scope principle**: Only necessary permissions requested
 - **User consent required**: Google's OAuth flow requires explicit user approval
 - **Scope-specific access**: Limited to exact functionality needed

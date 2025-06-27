@@ -39,6 +39,9 @@ class AuthManager {
     this.authPromise = null; // Prevent multiple concurrent auth attempts
     this.tokenInfo = null;
     
+    // Perform comprehensive configuration validation at startup
+    const configValidation = this._validateConfiguration();
+    
     this.debugLog('AuthManager initialized with corrected credentials', {
       clientId: AUTH_CONFIG.CLIENT_ID,
       clientIdLength: AUTH_CONFIG.CLIENT_ID.length,
@@ -46,8 +49,149 @@ class AuthManager {
       scopesCount: AUTH_CONFIG.SCOPES.length,
       initialState: this.currentState,
       debugEnabled: AUTH_CONFIG.DEBUG,
-      apiKey: AUTH_CONFIG.API_KEY ? 'present' : 'missing'
+      apiKey: AUTH_CONFIG.API_KEY ? 'present' : 'missing',
+      configValidation
     });
+
+    // Log any critical configuration issues
+    if (configValidation.criticalIssues.length > 0) {
+      this.debugLog('CRITICAL CONFIGURATION ISSUES DETECTED', {
+        issues: configValidation.criticalIssues,
+        recommendations: configValidation.recommendations
+      });
+    }
+  }
+
+  /**
+   * Validates the OAuth configuration between auth.js and manifest.json
+   * @returns {Object} Validation results with any issues found
+   * @private
+   */
+  _validateConfiguration() {
+    const validation = {
+      isValid: true,
+      criticalIssues: [],
+      warnings: [],
+      recommendations: [],
+      details: {}
+    };
+
+    try {
+      // Get manifest configuration
+      const manifest = chrome.runtime.getManifest();
+      const manifestClientId = manifest.oauth2?.client_id;
+      const manifestScopes = manifest.oauth2?.scopes || [];
+
+      validation.details = {
+        authConfigClientId: AUTH_CONFIG.CLIENT_ID,
+        authConfigClientIdType: typeof AUTH_CONFIG.CLIENT_ID,
+        authConfigClientIdLength: AUTH_CONFIG.CLIENT_ID ? AUTH_CONFIG.CLIENT_ID.length : 0,
+        authConfigScopes: AUTH_CONFIG.SCOPES,
+        manifestClientId: manifestClientId,
+        manifestClientIdType: typeof manifestClientId,
+        manifestClientIdLength: manifestClientId ? manifestClientId.length : 0,
+        manifestScopes: manifestScopes,
+        extensionId: chrome.runtime.id,
+        manifestVersion: manifest.manifest_version
+      };
+
+      // Check if client IDs match
+      if (AUTH_CONFIG.CLIENT_ID !== manifestClientId) {
+        validation.isValid = false;
+        validation.criticalIssues.push('Client ID mismatch between auth.js and manifest.json');
+        validation.recommendations.push('Ensure AUTH_CONFIG.CLIENT_ID in auth.js matches manifest.json oauth2.client_id');
+      }
+
+      // Check if auth.js client ID is valid
+      if (!AUTH_CONFIG.CLIENT_ID || typeof AUTH_CONFIG.CLIENT_ID !== 'string') {
+        validation.isValid = false;
+        validation.criticalIssues.push('AUTH_CONFIG.CLIENT_ID is not a valid string');
+        validation.recommendations.push('Set AUTH_CONFIG.CLIENT_ID to a valid Google OAuth client ID string');
+      } else if (AUTH_CONFIG.CLIENT_ID.includes('YOUR_') || AUTH_CONFIG.CLIENT_ID.includes('PLACEHOLDER')) {
+        validation.isValid = false;
+        validation.criticalIssues.push('AUTH_CONFIG.CLIENT_ID appears to be a placeholder value');
+        validation.recommendations.push('Replace AUTH_CONFIG.CLIENT_ID with actual Google OAuth client ID');
+      } else if (AUTH_CONFIG.CLIENT_ID.length < 50) {
+        validation.warnings.push('AUTH_CONFIG.CLIENT_ID seems shorter than expected for a Google OAuth client ID');
+      }
+
+      // Check if manifest client ID is valid
+      if (!manifestClientId || typeof manifestClientId !== 'string') {
+        validation.isValid = false;
+        validation.criticalIssues.push('manifest.json oauth2.client_id is not set or not a valid string');
+        validation.recommendations.push('Set oauth2.client_id in manifest.json to a valid Google OAuth client ID');
+      } else if (manifestClientId.includes('YOUR_') || manifestClientId.includes('PLACEHOLDER')) {
+        validation.isValid = false;
+        validation.criticalIssues.push('manifest.json oauth2.client_id appears to be a placeholder value');
+        validation.recommendations.push('Replace oauth2.client_id in manifest.json with actual Google OAuth client ID');
+      }
+
+      // Check scopes consistency
+      const authScopesSet = new Set(AUTH_CONFIG.SCOPES);
+      const manifestScopesSet = new Set(manifestScopes);
+      const missingScopesInManifest = AUTH_CONFIG.SCOPES.filter(scope => !manifestScopesSet.has(scope));
+      const extraScopesInManifest = manifestScopes.filter(scope => !authScopesSet.has(scope));
+
+      if (missingScopesInManifest.length > 0) {
+        validation.warnings.push(`Scopes in auth.js not found in manifest.json: ${missingScopesInManifest.join(', ')}`);
+      }
+
+      if (extraScopesInManifest.length > 0) {
+        validation.warnings.push(`Extra scopes in manifest.json not used in auth.js: ${extraScopesInManifest.join(', ')}`);
+      }
+
+      // Check for potential format issues
+      if (AUTH_CONFIG.CLIENT_ID === '0' || AUTH_CONFIG.CLIENT_ID === 0) {
+        validation.isValid = false;
+        validation.criticalIssues.push('AUTH_CONFIG.CLIENT_ID is set to zero - this will cause "(0)" errors');
+        validation.recommendations.push('Set AUTH_CONFIG.CLIENT_ID to the correct Google OAuth client ID string');
+      }
+
+      if (manifestClientId === '0' || manifestClientId === 0) {
+        validation.isValid = false;
+        validation.criticalIssues.push('manifest.json client_id is set to zero - this will cause "(0)" errors');
+        validation.recommendations.push('Set oauth2.client_id in manifest.json to the correct Google OAuth client ID');
+      }
+
+    } catch (error) {
+      validation.isValid = false;
+      validation.criticalIssues.push(`Configuration validation failed: ${error.message}`);
+      validation.recommendations.push('Check that chrome.runtime.getManifest() is accessible');
+    }
+
+         return validation;
+   }
+
+  /**
+   * Quick configuration check for debugging - can be called from console
+   * @returns {Object} Current configuration status
+   */
+  getConfigurationStatus() {
+    const validation = this._validateConfiguration();
+    
+    const status = {
+      timestamp: new Date().toISOString(),
+      configurationValid: validation.isValid,
+      clientIdMatch: AUTH_CONFIG.CLIENT_ID === chrome.runtime.getManifest().oauth2?.client_id,
+      authConfigClientId: AUTH_CONFIG.CLIENT_ID,
+      manifestClientId: chrome.runtime.getManifest().oauth2?.client_id,
+      extensionId: chrome.runtime.id,
+      criticalIssues: validation.criticalIssues,
+      warnings: validation.warnings,
+      recommendations: validation.recommendations,
+      authState: this.currentState,
+      quickHealthCheck: {
+        authJsClientIdValid: !!(AUTH_CONFIG.CLIENT_ID && typeof AUTH_CONFIG.CLIENT_ID === 'string' && AUTH_CONFIG.CLIENT_ID.length > 20),
+        manifestClientIdValid: !!(chrome.runtime.getManifest().oauth2?.client_id && typeof chrome.runtime.getManifest().oauth2?.client_id === 'string'),
+        clientIdsMatch: AUTH_CONFIG.CLIENT_ID === chrome.runtime.getManifest().oauth2?.client_id,
+        noPlaceholders: !AUTH_CONFIG.CLIENT_ID.includes('YOUR_') && !AUTH_CONFIG.CLIENT_ID.includes('PLACEHOLDER'),
+        notZero: AUTH_CONFIG.CLIENT_ID !== '0' && AUTH_CONFIG.CLIENT_ID !== 0
+      }
+    };
+    
+    this.debugLog('Configuration status check', status);
+    
+    return status;
   }
 
   /**
@@ -340,15 +484,73 @@ class AuthManager {
       }
 
       const requestOptions = { interactive };
+      
+      // Get manifest client ID for comparison
+      const manifestClientId = chrome.runtime.getManifest().oauth2?.client_id;
+      
+      // Detailed client ID validation and logging
+      const clientIdValidation = {
+        configClientId: AUTH_CONFIG.CLIENT_ID,
+        configClientIdType: typeof AUTH_CONFIG.CLIENT_ID,
+        configClientIdLength: AUTH_CONFIG.CLIENT_ID ? AUTH_CONFIG.CLIENT_ID.length : 0,
+        configClientIdIsString: typeof AUTH_CONFIG.CLIENT_ID === 'string',
+        configClientIdTruthy: !!AUTH_CONFIG.CLIENT_ID,
+        configClientIdValue: AUTH_CONFIG.CLIENT_ID, // Full value for debugging
+        manifestClientId: manifestClientId,
+        manifestClientIdType: typeof manifestClientId,
+        manifestClientIdLength: manifestClientId ? manifestClientId.length : 0,
+        clientIdsMatch: AUTH_CONFIG.CLIENT_ID === manifestClientId,
+        actualValueBeingUsed: AUTH_CONFIG.CLIENT_ID || 'UNDEFINED/NULL'
+      };
+      
+      this.debugLog('CLIENT ID VALIDATION - Pre-Request Analysis', clientIdValidation);
+      
+      // Check for specific problematic values
+      if (!AUTH_CONFIG.CLIENT_ID) {
+        this.debugLog('CRITICAL: CLIENT_ID is null/undefined/empty!', {
+          configValue: AUTH_CONFIG.CLIENT_ID,
+          configType: typeof AUTH_CONFIG.CLIENT_ID,
+          manifestValue: manifestClientId
+        });
+      }
+      
+      if (AUTH_CONFIG.CLIENT_ID === '0' || AUTH_CONFIG.CLIENT_ID === 0) {
+        this.debugLog('CRITICAL: CLIENT_ID is set to zero!', {
+          configValue: AUTH_CONFIG.CLIENT_ID,
+          configType: typeof AUTH_CONFIG.CLIENT_ID
+        });
+      }
+      
+      if (AUTH_CONFIG.CLIENT_ID && AUTH_CONFIG.CLIENT_ID.includes('YOUR_') || AUTH_CONFIG.CLIENT_ID && AUTH_CONFIG.CLIENT_ID.includes('PLACEHOLDER')) {
+        this.debugLog('CRITICAL: CLIENT_ID appears to be a placeholder!', {
+          configValue: AUTH_CONFIG.CLIENT_ID
+        });
+      }
+      
       this.debugLog('Calling chrome.identity.getAuthToken with detailed config', {
         interactive,
         clientIdUsed: AUTH_CONFIG.CLIENT_ID,
-        clientIdLength: AUTH_CONFIG.CLIENT_ID.length,
+        clientIdLength: AUTH_CONFIG.CLIENT_ID ? AUTH_CONFIG.CLIENT_ID.length : 0,
+        clientIdFirstChars: AUTH_CONFIG.CLIENT_ID ? AUTH_CONFIG.CLIENT_ID.substring(0, 15) : 'NULL',
+        clientIdLastChars: AUTH_CONFIG.CLIENT_ID ? AUTH_CONFIG.CLIENT_ID.substring(AUTH_CONFIG.CLIENT_ID.length - 10) : 'NULL',
         scopesRequested: AUTH_CONFIG.SCOPES,
         manifestScopes: chrome.runtime.getManifest().oauth2?.scopes || [],
-        requestOptions
+        manifestClientId: manifestClientId,
+        requestOptions,
+        chromeIdentityFunction: typeof chrome.identity.getAuthToken
       });
       
+      // Log the exact request being made to Chrome Identity API
+      this.debugLog('ABOUT TO CALL chrome.identity.getAuthToken - Final Request Details', {
+        exactRequestOptions: requestOptions,
+        chromeObjectExists: !!chrome,
+        chromeIdentityExists: !!chrome.identity,
+        chromeIdentityGetAuthTokenExists: !!chrome.identity.getAuthToken,
+        manifestOAuth2Config: chrome.runtime.getManifest().oauth2,
+        authConfigClientId: AUTH_CONFIG.CLIENT_ID,
+        requestAboutToBeMade: 'chrome.identity.getAuthToken(requestOptions)'
+      });
+
       const tokenResult = await chrome.identity.getAuthToken(requestOptions);
 
       this.debugLog('Received response from Chrome Identity API', {
@@ -356,7 +558,8 @@ class AuthManager {
         resultExists: !!tokenResult,
         resultIsString: typeof tokenResult === 'string',
         resultLength: tokenResult ? (typeof tokenResult === 'string' ? tokenResult.length : Object.keys(tokenResult).length) : 0,
-        successfulRequest: true
+        successfulRequest: true,
+        resultValue: tokenResult ? (typeof tokenResult === 'string' ? tokenResult.substring(0, 20) + '...' : tokenResult) : 'NULL_RESULT'
       });
 
       // Extract and validate the token using helper function
@@ -371,22 +574,71 @@ class AuthManager {
       return extractedToken;
 
     } catch (error) {
+      // Enhanced error logging to identify "(0)" issue and other Chrome Identity API problems
+      const errorString = error.toString();
+      const errorMessage = error.message || '';
+      
       // Comprehensive error logging with full error object analysis
       const errorAnalysis = this._analyzeAuthError(error);
       
+      // Special check for the "(0)" error pattern
+      const hasZeroError = errorString.includes('(0)') || errorMessage.includes('(0)');
+      const hasClientIdError = errorString.toLowerCase().includes('client') || errorMessage.toLowerCase().includes('client');
+      
       this.debugLog('Token request failed with detailed error analysis', {
         errorName: error.name,
-        errorMessage: error.message,
+        errorMessage: errorMessage,
+        errorString: errorString,
         errorStack: error.stack,
+        hasZeroErrorPattern: hasZeroError,
+        hasClientIdErrorPattern: hasClientIdError,
         fullErrorObject: {
           ...error,
-          toString: error.toString()
+          toString: error.toString(),
+          valueOf: error.valueOf ? error.valueOf() : 'no valueOf method'
         },
-        interactive,
-        clientIdUsed: AUTH_CONFIG.CLIENT_ID,
-        scopesRequested: AUTH_CONFIG.SCOPES,
-        errorAnalysis
+        chromeIdentityApiState: {
+          chromeExists: typeof chrome !== 'undefined',
+          chromeIdentityExists: typeof chrome !== 'undefined' && !!chrome.identity,
+          getAuthTokenExists: typeof chrome !== 'undefined' && !!chrome.identity?.getAuthToken
+        },
+        requestContext: {
+          interactive,
+          clientIdUsed: AUTH_CONFIG.CLIENT_ID,
+          clientIdLength: AUTH_CONFIG.CLIENT_ID ? AUTH_CONFIG.CLIENT_ID.length : 0,
+          clientIdType: typeof AUTH_CONFIG.CLIENT_ID,
+          clientIdIsValidString: typeof AUTH_CONFIG.CLIENT_ID === 'string' && AUTH_CONFIG.CLIENT_ID.length > 10,
+          scopesRequested: AUTH_CONFIG.SCOPES,
+          manifestClientId: chrome.runtime.getManifest().oauth2?.client_id
+        },
+        errorAnalysis,
+        possibleCauses: hasZeroError ? [
+          'Chrome extension manifest.json client_id not properly configured',
+          'Chrome Identity API receiving null/undefined client_id',
+          'Extension ID mismatch with OAuth client configuration',
+          'Chrome browser extension permissions issue'
+        ] : errorAnalysis.possibleCauses
       });
+      
+      // Enhanced error message for "(0)" pattern
+      if (hasZeroError) {
+        this.debugLog('DETECTED "(0)" ERROR PATTERN - This suggests Chrome Identity API issue', {
+          likelyRootCause: 'Chrome is not finding valid OAuth configuration',
+          checkPoints: [
+            'Verify manifest.json oauth2.client_id is correctly set',
+            'Ensure extension is properly loaded/reloaded after manifest changes',
+            'Check that client_id matches Google Cloud Console OAuth client',
+            'Verify Chrome extension ID matches OAuth client redirect URI'
+          ],
+          configValues: {
+            manifestClientId: chrome.runtime.getManifest().oauth2?.client_id,
+            authConfigClientId: AUTH_CONFIG.CLIENT_ID,
+            extensionId: chrome.runtime.id
+          }
+        });
+        
+        throw new Error(`Chrome Identity API returned "(0)" error - likely OAuth configuration issue. Check that manifest.json client_id is correctly configured and extension is properly loaded. Original error: ${errorMessage}`);
+      }
       
       // Throw specific error based on analysis
       throw new Error(errorAnalysis.specificMessage);
