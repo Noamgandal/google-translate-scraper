@@ -1,19 +1,11 @@
 // Google Translate Starred Words Scraper - Background Service Worker
 // Manifest V3 compliant background script
 
-// Import TabManager for tab operations
+// Import statements - must be at the very top
 importScripts('tab-manager.js');
-
-// Import AuthManager for Google OAuth authentication
 importScripts('auth.js');
-
-// Import ScrapingController for comprehensive scraping operations
 importScripts('scraper.js');
-
-// Import DataProcessor for data cleaning and validation
 importScripts('data-processor.js');
-
-// Import Google Sheets API for data synchronization
 importScripts('sheets-api.js');
 
 // Default extension settings
