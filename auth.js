@@ -7,7 +7,7 @@
 // Configuration constants
 const AUTH_CONFIG = {
   API_KEY: 'AIzaSyCmg6hbmyXqvv1Jhjy0dJHpaUHvbfbCRnA',
-  CLIENT_ID: '734462042602-7f6r7h8851tjprf7lqn5l1726at886pr.apps.googleusercontent.com',
+  CLIENT_ID: '734462042602-7f6r7h8851tjprf7lqn5l726at886pr.apps.googleusercontent.com',
   SCOPES: [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/gmail.send',
@@ -17,7 +17,8 @@ const AUTH_CONFIG = {
   TOKEN_INFO_STORAGE_KEY: 'google_token_info',
   TOKEN_EXPIRY_BUFFER: 5 * 60 * 1000, // 5 minutes buffer before expiry
   MAX_RETRY_ATTEMPTS: 3,
-  RETRY_DELAY: 1000 // 1 second
+  RETRY_DELAY: 1000, // 1 second
+  DEBUG: true // Enable detailed logging
 };
 
 // Authentication states
@@ -38,7 +39,52 @@ class AuthManager {
     this.authPromise = null; // Prevent multiple concurrent auth attempts
     this.tokenInfo = null;
     
-    console.log('AuthManager initialized');
+    this.debugLog('AuthManager initialized with corrected credentials', {
+      clientId: AUTH_CONFIG.CLIENT_ID,
+      clientIdLength: AUTH_CONFIG.CLIENT_ID.length,
+      scopes: AUTH_CONFIG.SCOPES,
+      scopesCount: AUTH_CONFIG.SCOPES.length,
+      initialState: this.currentState,
+      debugEnabled: AUTH_CONFIG.DEBUG,
+      apiKey: AUTH_CONFIG.API_KEY ? 'present' : 'missing'
+    });
+  }
+
+  /**
+   * Debug logging utility with structured output
+   */
+  debugLog(message, data = null) {
+    if (AUTH_CONFIG.DEBUG) {
+      const timestamp = new Date().toISOString();
+      const logEntry = {
+        timestamp,
+        component: 'AuthManager',
+        message,
+        state: this.currentState,
+        ...(data && { data })
+      };
+      
+      console.log(`[AUTH ${timestamp}] ${message}`, data || '');
+      
+      // Also store in a more structured format for debugging
+      if (typeof chrome !== 'undefined' && chrome.storage) {
+        try {
+          chrome.storage.local.get(['auth_debug_logs'], (result) => {
+            const logs = result.auth_debug_logs || [];
+            logs.push(logEntry);
+            
+            // Keep only last 50 log entries
+            if (logs.length > 50) {
+              logs.splice(0, logs.length - 50);
+            }
+            
+            chrome.storage.local.set({ auth_debug_logs: logs });
+          });
+        } catch (error) {
+          // Ignore storage errors in debug logging
+        }
+      }
+    }
   }
 
   /**
@@ -54,25 +100,41 @@ class AuthManager {
       forceRefresh: options.forceRefresh || false
     };
 
-    console.log('Getting auth token with options:', config);
+    this.debugLog('Starting authentication process', {
+      clientId: AUTH_CONFIG.CLIENT_ID,
+      interactive: config.interactive,
+      forceRefresh: config.forceRefresh,
+      currentState: this.currentState,
+      hasExistingPromise: !!this.authPromise
+    });
 
     try {
       // Prevent multiple concurrent authentication attempts
       if (this.authPromise) {
-        console.log('Authentication already in progress, waiting...');
+        this.debugLog('Authentication already in progress, waiting for existing promise');
         return await this.authPromise;
       }
 
+      this.debugLog('Creating new authentication promise');
       this.authPromise = this._performAuthentication(config);
       const token = await this.authPromise;
       this.authPromise = null;
+
+      this.debugLog('Authentication completed successfully', {
+        tokenLength: token ? token.length : 0,
+        tokenPrefix: token ? token.substring(0, 10) + '...' : 'null'
+      });
 
       return token;
 
     } catch (error) {
       this.authPromise = null;
-      console.error('Error getting auth token:', error);
       this.currentState = AUTH_STATES.ERROR;
+      this.debugLog('Authentication failed with error', {
+        errorName: error.name,
+        errorMessage: error.message,
+        errorStack: error.stack?.split('\n')[0] // First line of stack trace
+      });
       throw error;
     }
   }
@@ -83,34 +145,63 @@ class AuthManager {
    * @returns {Promise<string>} Access token
    */
   async _performAuthentication(config) {
+    this.debugLog('Beginning authentication process', {
+      forceRefresh: config.forceRefresh,
+      interactive: config.interactive
+    });
+
     try {
       this.currentState = AUTH_STATES.AUTHENTICATING;
+      this.debugLog('State changed to AUTHENTICATING');
 
       // Check if we have a valid cached token (unless force refresh)
       if (!config.forceRefresh) {
+        this.debugLog('Checking for cached token');
         const cachedToken = await this._getCachedToken();
         if (cachedToken) {
-          console.log('Using cached valid token');
+          this.debugLog('Found valid cached token, using it', {
+            tokenLength: cachedToken.length,
+            tokenPrefix: cachedToken.substring(0, 10) + '...'
+          });
           this.currentState = AUTH_STATES.AUTHENTICATED;
           return cachedToken;
+        } else {
+          this.debugLog('No valid cached token found');
         }
+      } else {
+        this.debugLog('Force refresh requested, skipping cached token check');
       }
 
       // Get token from Chrome Identity API
-      console.log('Requesting new token from Chrome Identity API...');
+      this.debugLog('Requesting new token from Chrome Identity API', {
+        clientId: AUTH_CONFIG.CLIENT_ID,
+        interactive: config.interactive
+      });
       const token = await this._requestNewToken(config.interactive);
 
+      this.debugLog('Received token from Chrome Identity API', {
+        tokenReceived: !!token,
+        tokenLength: token ? token.length : 0
+      });
+
       // Validate and store the token
+      this.debugLog('Validating and storing token');
       await this._validateAndStoreToken(token);
 
       this.currentState = AUTH_STATES.AUTHENTICATED;
-      console.log('Authentication successful');
+      this.debugLog('Authentication process completed successfully', {
+        finalState: this.currentState
+      });
 
       return token;
 
     } catch (error) {
       this.currentState = AUTH_STATES.ERROR;
-      console.error('Authentication failed:', error);
+      this.debugLog('Authentication process failed', {
+        errorName: error.name,
+        errorMessage: error.message,
+        finalState: this.currentState
+      });
       throw error;
     }
   }
@@ -122,7 +213,13 @@ class AuthManager {
    * @private
    */
   _extractTokenFromResult(tokenResult) {
+    this.debugLog('Starting token extraction', {
+      resultProvided: !!tokenResult,
+      resultType: typeof tokenResult
+    });
+
     if (!tokenResult) {
+      this.debugLog('Token extraction failed: No token result provided');
       throw new Error('No token result provided');
     }
 
@@ -131,37 +228,71 @@ class AuthManager {
     if (typeof tokenResult === 'string') {
       // Direct string token (most common case)
       extractedToken = tokenResult;
-      console.log('Token received as string');
+      this.debugLog('Token received as string', {
+        tokenLength: extractedToken.length
+      });
     } else if (typeof tokenResult === 'object' && tokenResult !== null) {
       // Object with token property (Manifest V3 in some Chrome versions)
+      const objectKeys = Object.keys(tokenResult);
+      this.debugLog('Token received as object', {
+        availableKeys: objectKeys
+      });
+
       if (tokenResult.token && typeof tokenResult.token === 'string') {
         extractedToken = tokenResult.token;
-        console.log('Token extracted from object.token property');
+        this.debugLog('Token extracted from object.token property', {
+          tokenLength: extractedToken.length
+        });
       } else if (tokenResult.access_token && typeof tokenResult.access_token === 'string') {
         extractedToken = tokenResult.access_token;
-        console.log('Token extracted from object.access_token property');
+        this.debugLog('Token extracted from object.access_token property', {
+          tokenLength: extractedToken.length
+        });
       } else {
-        console.error('Invalid token object structure:', Object.keys(tokenResult));
+        this.debugLog('Invalid token object structure', {
+          availableKeys: objectKeys,
+          hasToken: 'token' in tokenResult,
+          hasAccessToken: 'access_token' in tokenResult
+        });
         throw new Error('Invalid token object: missing token or access_token property');
       }
     } else {
-      console.error('Invalid token type received:', typeof tokenResult);
+      this.debugLog('Invalid token type received', {
+        tokenType: typeof tokenResult,
+        tokenValue: tokenResult
+      });
       throw new Error(`Invalid token type received: ${typeof tokenResult}`);
     }
 
     // Validate the extracted token
     if (!extractedToken || typeof extractedToken !== 'string') {
+      this.debugLog('Token validation failed: not a valid string', {
+        tokenExists: !!extractedToken,
+        tokenType: typeof extractedToken
+      });
       throw new Error('Extracted token is not a valid string');
     }
 
     // Basic token format validation
     if (extractedToken.length < 10) {
+      this.debugLog('Token validation failed: too short', {
+        tokenLength: extractedToken.length
+      });
       throw new Error('Token appears to be too short to be valid');
     }
 
     // Check for common token patterns
-    if (!extractedToken.match(/^[a-zA-Z0-9._-]+$/)) {
-      console.warn('Token contains unexpected characters, but proceeding...');
+    const tokenPattern = /^[a-zA-Z0-9._-]+$/;
+    if (!extractedToken.match(tokenPattern)) {
+      this.debugLog('Token contains unexpected characters, but proceeding', {
+        tokenLength: extractedToken.length,
+        tokenPrefix: extractedToken.substring(0, 10) + '...'
+      });
+    } else {
+      this.debugLog('Token format validation passed', {
+        tokenLength: extractedToken.length,
+        tokenPrefix: extractedToken.substring(0, 10) + '...'
+      });
     }
 
     return extractedToken;
@@ -188,35 +319,74 @@ class AuthManager {
    * @returns {Promise<string>} Access token
    */
   async _requestNewToken(interactive) {
+    this.debugLog('Initiating token request to Chrome Identity API', {
+      interactive,
+      clientId: AUTH_CONFIG.CLIENT_ID,
+      chromeIdentityAvailable: !!(typeof chrome !== 'undefined' && chrome.identity)
+    });
+
     try {
-      console.log(`Requesting new token from Chrome Identity API (interactive: ${interactive})`);
+      if (typeof chrome === 'undefined' || !chrome.identity) {
+        throw new Error('Chrome Identity API not available');
+      }
+
+      this.debugLog('Calling chrome.identity.getAuthToken', {
+        interactive,
+        options: { interactive }
+      });
       
       const tokenResult = await chrome.identity.getAuthToken({
         interactive: interactive
       });
 
-      console.log('Raw token result from Chrome Identity API:', typeof tokenResult, tokenResult ? 'received' : 'null');
+      this.debugLog('Received response from Chrome Identity API', {
+        resultType: typeof tokenResult,
+        resultExists: !!tokenResult,
+        resultIsString: typeof tokenResult === 'string',
+        resultLength: tokenResult ? (typeof tokenResult === 'string' ? tokenResult.length : Object.keys(tokenResult).length) : 0
+      });
 
       // Extract and validate the token using helper function
+      this.debugLog('Extracting token from API response');
       const extractedToken = this._extractTokenFromResult(tokenResult);
 
-      console.log(`New token received and validated from Chrome Identity API (length: ${extractedToken.length})`);
+      this.debugLog('Token successfully extracted and validated', {
+        tokenLength: extractedToken.length,
+        tokenPrefix: extractedToken.substring(0, 10) + '...'
+      });
       return extractedToken;
 
     } catch (error) {
-      console.error('Error requesting new token:', error);
+      this.debugLog('Token request failed', {
+        errorName: error.name,
+        errorMessage: error.message,
+        interactive
+      });
       
       // Handle specific Chrome Identity API errors
       if (error.message.includes('OAuth2 not granted or revoked')) {
-        throw new Error('OAuth2 permission not granted. Please authorize the extension.');
+        const authError = new Error('OAuth2 permission not granted. Please authorize the extension.');
+        this.debugLog('OAuth2 permission denied', { originalError: error.message });
+        throw authError;
       } else if (error.message.includes('The user did not approve access')) {
-        throw new Error('User denied authorization. Please try again and approve access.');
+        const authError = new Error('User denied authorization. Please try again and approve access.');
+        this.debugLog('User denied authorization', { originalError: error.message });
+        throw authError;
       } else if (error.message.includes('User cancelled')) {
-        throw new Error('User cancelled the authorization process.');
+        const authError = new Error('User cancelled the authorization process.');
+        this.debugLog('User cancelled authorization', { originalError: error.message });
+        throw authError;
       } else if (error.message.includes('network')) {
-        throw new Error('Network error during authentication. Please check your connection.');
+        const authError = new Error('Network error during authentication. Please check your connection.');
+        this.debugLog('Network error during auth', { originalError: error.message });
+        throw authError;
       } else {
-        throw new Error(`Authentication failed: ${error.message}`);
+        const authError = new Error(`Authentication failed: ${error.message}`);
+        this.debugLog('Unhandled authentication error', { 
+          originalError: error.message,
+          errorType: error.name 
+        });
+        throw authError;
       }
     }
   }
@@ -226,6 +396,8 @@ class AuthManager {
    * @returns {Promise<string|null>} Cached token or null
    */
   async _getCachedToken() {
+    this.debugLog('Checking for cached token');
+
     try {
       const result = await chrome.storage.local.get([
         AUTH_CONFIG.TOKEN_STORAGE_KEY,
@@ -235,27 +407,50 @@ class AuthManager {
       const cachedToken = result[AUTH_CONFIG.TOKEN_STORAGE_KEY];
       const tokenInfo = result[AUTH_CONFIG.TOKEN_INFO_STORAGE_KEY];
 
+      this.debugLog('Retrieved cached data from storage', {
+        hasToken: !!cachedToken,
+        hasTokenInfo: !!tokenInfo,
+        tokenLength: cachedToken ? cachedToken.length : 0
+      });
+
       if (!cachedToken || !tokenInfo) {
-        console.log('No cached token found');
+        this.debugLog('No cached token or token info found');
         return null;
       }
 
       // Check if token is expired (with buffer)
       const now = Date.now();
       const expiryTime = tokenInfo.expiryTime - AUTH_CONFIG.TOKEN_EXPIRY_BUFFER;
+      const timeUntilExpiry = expiryTime - now;
+
+      this.debugLog('Checking token expiry', {
+        now: new Date(now).toISOString(),
+        expiryTime: new Date(expiryTime).toISOString(),
+        timeUntilExpiryMs: timeUntilExpiry,
+        timeUntilExpiryMinutes: Math.round(timeUntilExpiry / 1000 / 60),
+        isExpired: now >= expiryTime
+      });
 
       if (now >= expiryTime) {
-        console.log('Cached token is expired');
+        this.debugLog('Cached token is expired, clearing it');
         await this._clearStoredToken();
         return null;
       }
 
-      console.log(`Cached token is valid for ${Math.round((expiryTime - now) / 1000 / 60)} more minutes`);
+      const minutesRemaining = Math.round(timeUntilExpiry / 1000 / 60);
+      this.debugLog('Cached token is valid', {
+        minutesRemaining,
+        email: tokenInfo.email
+      });
+      
       this.tokenInfo = tokenInfo;
       return cachedToken;
 
     } catch (error) {
-      console.error('Error checking cached token:', error);
+      this.debugLog('Error checking cached token', {
+        errorName: error.name,
+        errorMessage: error.message
+      });
       return null;
     }
   }
@@ -706,6 +901,46 @@ class AuthManager {
       );
       contextualError.originalError = error;
       throw contextualError;
+    }
+  }
+
+  /**
+   * Retrieves stored debug logs for troubleshooting
+   * @returns {Promise<Array>} Array of debug log entries
+   */
+  async getDebugLogs() {
+    try {
+      if (!AUTH_CONFIG.DEBUG) {
+        return ['Debug logging is disabled'];
+      }
+
+      const result = await chrome.storage.local.get(['auth_debug_logs']);
+      const logs = result.auth_debug_logs || [];
+      
+      this.debugLog('Retrieved debug logs', {
+        logCount: logs.length,
+        latestLogTime: logs.length > 0 ? logs[logs.length - 1].timestamp : 'none'
+      });
+
+      return logs;
+    } catch (error) {
+      console.error('Error retrieving debug logs:', error);
+      return [`Error retrieving logs: ${error.message}`];
+    }
+  }
+
+  /**
+   * Clears stored debug logs
+   * @returns {Promise<boolean>} Success status
+   */
+  async clearDebugLogs() {
+    try {
+      await chrome.storage.local.remove(['auth_debug_logs']);
+      this.debugLog('Debug logs cleared');
+      return true;
+    } catch (error) {
+      console.error('Error clearing debug logs:', error);
+      return false;
     }
   }
 }
