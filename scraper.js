@@ -4,10 +4,7 @@
  * Compatible with Chrome Extension Manifest V3 service worker architecture
  */
 
-// Import tab manager for hidden tab operations
-const TabManager = (typeof globalThis !== 'undefined' && globalThis.TabManager) || 
-                  (typeof self !== 'undefined' && self.TabManager) ||
-                  require('./tab-manager.js').TabManager;
+// TabManager is available globally through background.js imports
 
 // Configuration constants
 const SCRAPER_CONFIG = {
