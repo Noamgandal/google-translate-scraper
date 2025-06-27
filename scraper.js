@@ -184,11 +184,17 @@ class ScrapingController {
       
       // Step 2: Create hidden tab and navigate to Google Translate
       this.debugLog('Step 2: Creating hidden tab and navigating to Google Translate');
-      tabId = await this.tabManager.createHiddenTab();
+      const tabResult = await this.tabManager.createAndNavigateToGoogleTranslate({
+        url: SCRAPER_CONFIG.GOOGLE_TRANSLATE_SAVED_URL,
+        autoCleanup: false // We'll handle cleanup manually
+      });
+      
+      if (!tabResult.success) {
+        throw new Error(`Tab creation failed: ${tabResult.error}`);
+      }
+      
+      tabId = tabResult.tabId;
       this.currentTabId = tabId;
-
-      await this.tabManager.navigateToUrl(SCRAPER_CONFIG.GOOGLE_TRANSLATE_SAVED_URL);
-      await this.tabManager.waitForPageLoad();
 
       // Step 3: Inject content script
       this.debugLog('Step 3: Injecting content script');
@@ -546,7 +552,7 @@ class ScrapingController {
       this.debugLog('Starting cleanup process');
 
       if (this.tabManager && this.currentTabId) {
-        await this.tabManager.cleanup();
+        await this.tabManager.cleanupTab(this.currentTabId);
         this.debugLog(`Cleaned up tab ${this.currentTabId}`);
       }
 
