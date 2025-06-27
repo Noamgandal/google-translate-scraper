@@ -322,28 +322,41 @@ class AuthManager {
     this.debugLog('Initiating token request to Chrome Identity API', {
       interactive,
       clientId: AUTH_CONFIG.CLIENT_ID,
-      chromeIdentityAvailable: !!(typeof chrome !== 'undefined' && chrome.identity)
+      requestedScopes: AUTH_CONFIG.SCOPES,
+      scopeCount: AUTH_CONFIG.SCOPES.length,
+      chromeIdentityAvailable: !!(typeof chrome !== 'undefined' && chrome.identity),
+      chromeVersion: typeof chrome !== 'undefined' ? chrome.runtime.getManifest().version : 'unknown'
     });
 
     try {
       if (typeof chrome === 'undefined' || !chrome.identity) {
-        throw new Error('Chrome Identity API not available');
+        const errorMsg = 'Chrome Identity API not available';
+        this.debugLog('Chrome Identity API unavailable', {
+          chromeExists: typeof chrome !== 'undefined',
+          chromeIdentityExists: typeof chrome !== 'undefined' && !!chrome.identity,
+          userAgent: navigator.userAgent
+        });
+        throw new Error(errorMsg);
       }
 
-      this.debugLog('Calling chrome.identity.getAuthToken', {
+      const requestOptions = { interactive };
+      this.debugLog('Calling chrome.identity.getAuthToken with detailed config', {
         interactive,
-        options: { interactive }
+        clientIdUsed: AUTH_CONFIG.CLIENT_ID,
+        clientIdLength: AUTH_CONFIG.CLIENT_ID.length,
+        scopesRequested: AUTH_CONFIG.SCOPES,
+        manifestScopes: chrome.runtime.getManifest().oauth2?.scopes || [],
+        requestOptions
       });
       
-      const tokenResult = await chrome.identity.getAuthToken({
-        interactive: interactive
-      });
+      const tokenResult = await chrome.identity.getAuthToken(requestOptions);
 
       this.debugLog('Received response from Chrome Identity API', {
         resultType: typeof tokenResult,
         resultExists: !!tokenResult,
         resultIsString: typeof tokenResult === 'string',
-        resultLength: tokenResult ? (typeof tokenResult === 'string' ? tokenResult.length : Object.keys(tokenResult).length) : 0
+        resultLength: tokenResult ? (typeof tokenResult === 'string' ? tokenResult.length : Object.keys(tokenResult).length) : 0,
+        successfulRequest: true
       });
 
       // Extract and validate the token using helper function
@@ -352,43 +365,180 @@ class AuthManager {
 
       this.debugLog('Token successfully extracted and validated', {
         tokenLength: extractedToken.length,
-        tokenPrefix: extractedToken.substring(0, 10) + '...'
+        tokenPrefix: extractedToken.substring(0, 10) + '...',
+        tokenFormat: 'valid'
       });
       return extractedToken;
 
     } catch (error) {
-      this.debugLog('Token request failed', {
+      // Comprehensive error logging with full error object analysis
+      const errorAnalysis = this._analyzeAuthError(error);
+      
+      this.debugLog('Token request failed with detailed error analysis', {
         errorName: error.name,
         errorMessage: error.message,
-        interactive
+        errorStack: error.stack,
+        fullErrorObject: {
+          ...error,
+          toString: error.toString()
+        },
+        interactive,
+        clientIdUsed: AUTH_CONFIG.CLIENT_ID,
+        scopesRequested: AUTH_CONFIG.SCOPES,
+        errorAnalysis
       });
       
-      // Handle specific Chrome Identity API errors
-      if (error.message.includes('OAuth2 not granted or revoked')) {
-        const authError = new Error('OAuth2 permission not granted. Please authorize the extension.');
-        this.debugLog('OAuth2 permission denied', { originalError: error.message });
-        throw authError;
-      } else if (error.message.includes('The user did not approve access')) {
-        const authError = new Error('User denied authorization. Please try again and approve access.');
-        this.debugLog('User denied authorization', { originalError: error.message });
-        throw authError;
-      } else if (error.message.includes('User cancelled')) {
-        const authError = new Error('User cancelled the authorization process.');
-        this.debugLog('User cancelled authorization', { originalError: error.message });
-        throw authError;
-      } else if (error.message.includes('network')) {
-        const authError = new Error('Network error during authentication. Please check your connection.');
-        this.debugLog('Network error during auth', { originalError: error.message });
-        throw authError;
-      } else {
-        const authError = new Error(`Authentication failed: ${error.message}`);
-        this.debugLog('Unhandled authentication error', { 
-          originalError: error.message,
-          errorType: error.name 
-        });
-        throw authError;
-      }
+      // Throw specific error based on analysis
+      throw new Error(errorAnalysis.specificMessage);
     }
+  }
+
+  /**
+   * Analyzes authentication errors to provide specific diagnosis
+   * @param {Error} error - The original error from Chrome Identity API
+   * @returns {Object} Error analysis with specific diagnosis
+   * @private
+   */
+  _analyzeAuthError(error) {
+    const errorMsg = error.message || '';
+    const errorStr = error.toString() || '';
+    const fullErrorText = `${errorMsg} ${errorStr}`.toLowerCase();
+
+    let errorType = 'unknown';
+    let specificMessage = '';
+    let possibleCauses = [];
+    let suggestedActions = [];
+
+    // Analyze error patterns for specific issues
+    if (fullErrorText.includes('oauth2 not granted') || fullErrorText.includes('not granted or revoked')) {
+      errorType = 'oauth_not_granted';
+      specificMessage = 'OAuth2 permission not granted. The extension needs to be authorized.';
+      possibleCauses = [
+        'User has not completed the OAuth consent flow',
+        'OAuth consent was revoked',
+        'Client ID not properly configured in Google Cloud Console'
+      ];
+      suggestedActions = [
+        'Run interactive authentication to show consent screen',
+        'Check OAuth client configuration in Google Cloud Console',
+        'Verify redirect URIs are properly configured'
+      ];
+    } else if (fullErrorText.includes('user did not approve') || fullErrorText.includes('access_denied')) {
+      errorType = 'user_denied';
+      specificMessage = 'User denied authorization. Please try again and approve access.';
+      possibleCauses = [
+        'User clicked "Cancel" or "Deny" on consent screen',
+        'User closed the consent window without completing authorization'
+      ];
+      suggestedActions = [
+        'Retry authentication and ensure user clicks "Allow"',
+        'Explain to user why permissions are needed'
+      ];
+    } else if (fullErrorText.includes('user cancelled') || fullErrorText.includes('cancelled')) {
+      errorType = 'user_cancelled';
+      specificMessage = 'User cancelled the authorization process.';
+      possibleCauses = ['User closed consent window before completing'];
+      suggestedActions = ['Retry authentication when user is ready'];
+    } else if (fullErrorText.includes('invalid_client') || fullErrorText.includes('client_id')) {
+      errorType = 'invalid_client';
+      specificMessage = 'Invalid client configuration. Check your OAuth client ID.';
+      possibleCauses = [
+        'Client ID is incorrect or not found',
+        'Client ID not enabled for this domain',
+        'OAuth client not properly configured in Google Cloud Console'
+      ];
+      suggestedActions = [
+        'Verify client ID in manifest.json matches Google Cloud Console',
+        'Check that OAuth client is enabled',
+        'Verify authorized domains are configured'
+      ];
+    } else if (fullErrorText.includes('invalid_scope') || fullErrorText.includes('scope')) {
+      errorType = 'invalid_scope';
+      specificMessage = 'Invalid or unauthorized scopes requested.';
+      possibleCauses = [
+        'Requested scopes are not enabled for this client',
+        'Scopes require additional API enablement',
+        'Scope names are incorrect'
+      ];
+      suggestedActions = [
+        'Check that required APIs are enabled in Google Cloud Console',
+        'Verify scope names match Google API documentation',
+        'Enable Google Sheets API and Gmail API'
+      ];
+    } else if (fullErrorText.includes('api not enabled') || fullErrorText.includes('api_not_enabled')) {
+      errorType = 'api_not_enabled';
+      specificMessage = 'Required Google APIs are not enabled. Enable Google Sheets API and Gmail API.';
+      possibleCauses = [
+        'Google Sheets API not enabled',
+        'Gmail API not enabled',
+        'OAuth API not enabled'
+      ];
+      suggestedActions = [
+        'Enable Google Sheets API in Google Cloud Console',
+        'Enable Gmail API in Google Cloud Console',
+        'Enable Google OAuth2 API'
+      ];
+    } else if (fullErrorText.includes('consent') || fullErrorText.includes('verification')) {
+      errorType = 'consent_required';
+      specificMessage = 'OAuth consent screen verification required. The app may need to be verified by Google.';
+      possibleCauses = [
+        'OAuth consent screen not configured',
+        'App needs Google verification for sensitive scopes',
+        'Consent screen is in testing mode with limited users'
+      ];
+      suggestedActions = [
+        'Configure OAuth consent screen in Google Cloud Console',
+        'Add test users if app is in testing mode',
+        'Submit app for verification if using sensitive scopes'
+      ];
+    } else if (fullErrorText.includes('network') || fullErrorText.includes('fetch') || error.name === 'TypeError') {
+      errorType = 'network_error';
+      specificMessage = 'Network error during authentication. Check your internet connection.';
+      possibleCauses = [
+        'No internet connection',
+        'Firewall blocking OAuth requests',
+        'Google services temporarily unavailable'
+      ];
+      suggestedActions = [
+        'Check internet connection',
+        'Retry authentication',
+        'Check if corporate firewall is blocking Google APIs'
+      ];
+    } else if (fullErrorText.includes('redirect_uri') || fullErrorText.includes('redirect')) {
+      errorType = 'redirect_uri_error';
+      specificMessage = 'OAuth redirect URI error. Check OAuth client configuration.';
+      possibleCauses = [
+        'Redirect URI not configured in OAuth client',
+        'Chrome extension ID mismatch',
+        'Invalid redirect URI format'
+      ];
+      suggestedActions = [
+        'Add proper Chrome extension redirect URI to OAuth client',
+        'Verify extension ID matches configuration'
+      ];
+    } else {
+      errorType = 'unknown_error';
+      specificMessage = `Authentication failed with unknown error: ${errorMsg}`;
+      possibleCauses = ['Unexpected error from Chrome Identity API'];
+      suggestedActions = [
+        'Check browser console for more details',
+        'Try clearing extension data and re-authenticating',
+        'Check Google Cloud Console for OAuth client status'
+      ];
+    }
+
+    return {
+      errorType,
+      specificMessage,
+      possibleCauses,
+      suggestedActions,
+      originalError: errorMsg,
+      fullAnalysis: {
+        messageAnalyzed: errorMsg,
+        stringAnalyzed: errorStr,
+        errorName: error.name
+      }
+    };
   }
 
   /**
@@ -941,6 +1091,433 @@ class AuthManager {
     } catch (error) {
       console.error('Error clearing debug logs:', error);
       return false;
+    }
+  }
+
+  /**
+   * Tests if required Google APIs are enabled and accessible
+   * @param {Object} options - Testing options
+   * @param {boolean} options.interactive - Whether to attempt interactive auth if needed
+   * @returns {Promise<Object>} API availability test results
+   */
+  async testApiAvailability(options = {}) {
+    const config = {
+      interactive: options.interactive !== false
+    };
+
+    this.debugLog('Starting API availability test', {
+      clientId: AUTH_CONFIG.CLIENT_ID,
+      scopes: AUTH_CONFIG.SCOPES,
+      interactive: config.interactive
+    });
+
+    const results = {
+      timestamp: new Date().toISOString(),
+      authStatus: 'unknown',
+      apis: {
+        sheets: { available: false, error: null, details: null },
+        gmail: { available: false, error: null, details: null },
+        oauth2: { available: false, error: null, details: null }
+      },
+      overallSuccess: false,
+      recommendations: []
+    };
+
+    try {
+      // Step 1: Test authentication
+      this.debugLog('Testing authentication');
+      let token;
+      try {
+        token = await this.getAuthToken({ interactive: config.interactive });
+        results.authStatus = 'success';
+        this.debugLog('Authentication test passed', { tokenLength: token.length });
+      } catch (authError) {
+        results.authStatus = 'failed';
+        results.authError = {
+          message: authError.message,
+          type: 'authentication_error'
+        };
+        this.debugLog('Authentication test failed', { error: authError.message });
+        
+        // If auth fails, we can't test APIs
+        results.recommendations.push('Fix authentication issues before testing API availability');
+        return results;
+      }
+
+      // Step 2: Test Google Sheets API
+      this.debugLog('Testing Google Sheets API availability');
+      try {
+        const sheetsResponse = await fetch('https://sheets.googleapis.com/v4/spreadsheets?pageSize=1', {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        this.debugLog('Sheets API response received', {
+          status: sheetsResponse.status,
+          statusText: sheetsResponse.statusText,
+          headers: Object.fromEntries(sheetsResponse.headers.entries())
+        });
+
+        if (sheetsResponse.ok) {
+          const sheetsData = await sheetsResponse.json();
+          results.apis.sheets = {
+            available: true,
+            error: null,
+            details: {
+              status: sheetsResponse.status,
+              hasFiles: !!sheetsData.files,
+              fileCount: sheetsData.files ? sheetsData.files.length : 0
+            }
+          };
+          this.debugLog('Google Sheets API test passed');
+        } else {
+          const errorText = await sheetsResponse.text();
+          let errorData;
+          try {
+            errorData = JSON.parse(errorText);
+          } catch {
+            errorData = { message: errorText };
+          }
+
+          results.apis.sheets = {
+            available: false,
+            error: {
+              status: sheetsResponse.status,
+              statusText: sheetsResponse.statusText,
+              message: errorData.error?.message || errorData.message || 'Unknown error',
+              code: errorData.error?.code || sheetsResponse.status
+            },
+            details: null
+          };
+
+          this.debugLog('Google Sheets API test failed', {
+            status: sheetsResponse.status,
+            error: errorData
+          });
+
+          if (sheetsResponse.status === 403) {
+            if (errorText.includes('API_NOT_ENABLED') || errorText.includes('api not enabled')) {
+              results.recommendations.push('Enable Google Sheets API in Google Cloud Console');
+            } else if (errorText.includes('PERMISSION_DENIED')) {
+              results.recommendations.push('Add Google Sheets API scope to OAuth consent screen');
+            }
+          }
+        }
+      } catch (networkError) {
+        results.apis.sheets = {
+          available: false,
+          error: {
+            type: 'network_error',
+            message: networkError.message
+          },
+          details: null
+        };
+        this.debugLog('Google Sheets API network error', { error: networkError.message });
+        results.recommendations.push('Check network connectivity for Google Sheets API');
+      }
+
+      // Step 3: Test Gmail API
+      this.debugLog('Testing Gmail API availability');
+      try {
+        const gmailResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        this.debugLog('Gmail API response received', {
+          status: gmailResponse.status,
+          statusText: gmailResponse.statusText
+        });
+
+        if (gmailResponse.ok) {
+          const gmailData = await gmailResponse.json();
+          results.apis.gmail = {
+            available: true,
+            error: null,
+            details: {
+              status: gmailResponse.status,
+              emailAddress: gmailData.emailAddress,
+              messagesTotal: gmailData.messagesTotal,
+              threadsTotal: gmailData.threadsTotal
+            }
+          };
+          this.debugLog('Gmail API test passed', { emailAddress: gmailData.emailAddress });
+        } else {
+          const errorText = await gmailResponse.text();
+          let errorData;
+          try {
+            errorData = JSON.parse(errorText);
+          } catch {
+            errorData = { message: errorText };
+          }
+
+          results.apis.gmail = {
+            available: false,
+            error: {
+              status: gmailResponse.status,
+              statusText: gmailResponse.statusText,
+              message: errorData.error?.message || errorData.message || 'Unknown error',
+              code: errorData.error?.code || gmailResponse.status
+            },
+            details: null
+          };
+
+          this.debugLog('Gmail API test failed', {
+            status: gmailResponse.status,
+            error: errorData
+          });
+
+          if (gmailResponse.status === 403) {
+            if (errorText.includes('API_NOT_ENABLED') || errorText.includes('api not enabled')) {
+              results.recommendations.push('Enable Gmail API in Google Cloud Console');
+            } else if (errorText.includes('PERMISSION_DENIED')) {
+              results.recommendations.push('Add Gmail API scope to OAuth consent screen');
+            }
+          }
+        }
+      } catch (networkError) {
+        results.apis.gmail = {
+          available: false,
+          error: {
+            type: 'network_error',
+            message: networkError.message
+          },
+          details: null
+        };
+        this.debugLog('Gmail API network error', { error: networkError.message });
+        results.recommendations.push('Check network connectivity for Gmail API');
+      }
+
+      // Step 4: Test OAuth2 API (user info)
+      this.debugLog('Testing OAuth2 API availability');
+      try {
+        const oauth2Response = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        this.debugLog('OAuth2 API response received', {
+          status: oauth2Response.status,
+          statusText: oauth2Response.statusText
+        });
+
+        if (oauth2Response.ok) {
+          const userData = await oauth2Response.json();
+          results.apis.oauth2 = {
+            available: true,
+            error: null,
+            details: {
+              status: oauth2Response.status,
+              email: userData.email,
+              name: userData.name,
+              verified: userData.verified_email
+            }
+          };
+          this.debugLog('OAuth2 API test passed', { email: userData.email });
+        } else {
+          const errorText = await oauth2Response.text();
+          let errorData;
+          try {
+            errorData = JSON.parse(errorText);
+          } catch {
+            errorData = { message: errorText };
+          }
+
+          results.apis.oauth2 = {
+            available: false,
+            error: {
+              status: oauth2Response.status,
+              statusText: oauth2Response.statusText,
+              message: errorData.error?.message || errorData.message || 'Unknown error'
+            },
+            details: null
+          };
+          this.debugLog('OAuth2 API test failed', { status: oauth2Response.status, error: errorData });
+        }
+      } catch (networkError) {
+        results.apis.oauth2 = {
+          available: false,
+          error: {
+            type: 'network_error',
+            message: networkError.message
+          },
+          details: null
+        };
+        this.debugLog('OAuth2 API network error', { error: networkError.message });
+      }
+
+      // Step 5: Determine overall success and add general recommendations
+      const apisAvailable = Object.values(results.apis).filter(api => api.available).length;
+      const totalApis = Object.keys(results.apis).length;
+      
+      results.overallSuccess = apisAvailable === totalApis;
+      
+      this.debugLog('API availability test completed', {
+        overallSuccess: results.overallSuccess,
+        apisAvailable: `${apisAvailable}/${totalApis}`,
+        recommendations: results.recommendations
+      });
+
+      // Add general recommendations based on results
+      if (!results.apis.sheets.available && !results.apis.gmail.available) {
+        results.recommendations.push('Multiple APIs are not available - check Google Cloud Console project settings');
+      }
+      
+      if (results.recommendations.length === 0 && results.overallSuccess) {
+        results.recommendations.push('All APIs are working correctly!');
+      }
+
+      return results;
+
+    } catch (error) {
+      this.debugLog('API availability test failed with unexpected error', {
+        errorName: error.name,
+        errorMessage: error.message,
+        errorStack: error.stack
+      });
+
+      results.apis = {
+        sheets: { available: false, error: { type: 'test_error', message: error.message }, details: null },
+        gmail: { available: false, error: { type: 'test_error', message: error.message }, details: null },
+        oauth2: { available: false, error: { type: 'test_error', message: error.message }, details: null }
+      };
+      results.recommendations.push('Unexpected error during API testing - check browser console for details');
+      
+             return results;
+     }
+   }
+
+  /**
+   * Runs a comprehensive OAuth diagnostic that includes all tests and logs
+   * @param {Object} options - Diagnostic options
+   * @param {boolean} options.interactive - Whether to run interactive tests
+   * @param {boolean} options.includeDebugLogs - Whether to include recent debug logs
+   * @returns {Promise<Object>} Complete diagnostic results
+   */
+  async runComprehensiveDiagnostic(options = {}) {
+    const config = {
+      interactive: options.interactive !== false,
+      includeDebugLogs: options.includeDebugLogs !== false
+    };
+
+    this.debugLog('Starting comprehensive OAuth diagnostic', {
+      interactive: config.interactive,
+      includeDebugLogs: config.includeDebugLogs,
+      timestamp: new Date().toISOString()
+    });
+
+    const diagnostic = {
+      timestamp: new Date().toISOString(),
+      configuration: {
+        clientId: AUTH_CONFIG.CLIENT_ID,
+        clientIdLength: AUTH_CONFIG.CLIENT_ID.length,
+        scopes: AUTH_CONFIG.SCOPES,
+        apiKey: AUTH_CONFIG.API_KEY ? 'configured' : 'missing',
+        debugEnabled: AUTH_CONFIG.DEBUG
+      },
+      environment: {
+        userAgent: navigator.userAgent,
+        chromeAvailable: typeof chrome !== 'undefined',
+        chromeIdentityAvailable: typeof chrome !== 'undefined' && !!chrome.identity,
+        manifestVersion: typeof chrome !== 'undefined' ? chrome.runtime.getManifest().manifest_version : 'unknown',
+        extensionId: typeof chrome !== 'undefined' ? chrome.runtime.id : 'unknown'
+      },
+      authStatus: null,
+      apiTests: null,
+      debugLogs: null,
+      recommendations: [],
+      summary: {
+        overallStatus: 'unknown',
+        criticalIssues: [],
+        warnings: []
+      }
+    };
+
+    try {
+      // Step 1: Check authentication status
+      this.debugLog('Checking authentication status');
+      try {
+        diagnostic.authStatus = await this.checkAuthStatus();
+        if (diagnostic.authStatus.isAuthenticated) {
+          diagnostic.summary.overallStatus = 'authenticated';
+        } else {
+          diagnostic.summary.criticalIssues.push('User is not authenticated');
+        }
+      } catch (error) {
+        diagnostic.authStatus = { error: error.message, isAuthenticated: false };
+        diagnostic.summary.criticalIssues.push(`Authentication check failed: ${error.message}`);
+      }
+
+      // Step 2: Run API availability tests
+      this.debugLog('Running API availability tests');
+      try {
+        diagnostic.apiTests = await this.testApiAvailability({ interactive: config.interactive });
+        if (!diagnostic.apiTests.overallSuccess) {
+          diagnostic.summary.criticalIssues.push('Not all required APIs are available');
+          diagnostic.recommendations.push(...diagnostic.apiTests.recommendations);
+        }
+      } catch (error) {
+        diagnostic.apiTests = { error: error.message, overallSuccess: false };
+        diagnostic.summary.criticalIssues.push(`API testing failed: ${error.message}`);
+      }
+
+      // Step 3: Include debug logs if requested
+      if (config.includeDebugLogs) {
+        this.debugLog('Retrieving debug logs');
+        try {
+          diagnostic.debugLogs = await this.getDebugLogs();
+        } catch (error) {
+          diagnostic.debugLogs = [`Error retrieving logs: ${error.message}`];
+          diagnostic.summary.warnings.push('Could not retrieve debug logs');
+        }
+      }
+
+      // Step 4: Generate summary and recommendations
+      if (diagnostic.summary.criticalIssues.length === 0) {
+        diagnostic.summary.overallStatus = 'healthy';
+        diagnostic.recommendations.push('All OAuth and API systems are functioning correctly!');
+      } else {
+        diagnostic.summary.overallStatus = 'issues_detected';
+        
+        // Add general recommendations based on common issues
+        if (diagnostic.summary.criticalIssues.some(issue => issue.includes('authenticated'))) {
+          diagnostic.recommendations.unshift('Run interactive authentication to authorize the extension');
+        }
+        
+        if (diagnostic.summary.criticalIssues.some(issue => issue.includes('API'))) {
+          diagnostic.recommendations.push('Check Google Cloud Console for API enablement and configuration');
+        }
+      }
+
+      this.debugLog('Comprehensive diagnostic completed', {
+        overallStatus: diagnostic.summary.overallStatus,
+        criticalIssuesCount: diagnostic.summary.criticalIssues.length,
+        warningsCount: diagnostic.summary.warnings.length,
+        recommendationsCount: diagnostic.recommendations.length
+      });
+
+      return diagnostic;
+
+    } catch (error) {
+      this.debugLog('Comprehensive diagnostic failed with unexpected error', {
+        errorName: error.name,
+        errorMessage: error.message
+      });
+
+      diagnostic.summary.overallStatus = 'diagnostic_error';
+      diagnostic.summary.criticalIssues.push(`Diagnostic process failed: ${error.message}`);
+      diagnostic.recommendations.push('Check browser console for detailed error information');
+
+      return diagnostic;
     }
   }
 }
